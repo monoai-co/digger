@@ -72,6 +72,8 @@ type Project struct {
 	AwsCognitoOidcConfig *AwsCognitoOidcConfig
 	Generated            bool
 	PulumiStack          string
+	DriftIncludePatterns []string
+	DriftExcludePatterns []string
 }
 
 type Workflow struct {

@@ -92,6 +92,15 @@ func (mc MainController) TriggerDriftRunForProject(c *gin.Context) {
 		}
 	}
 
+	// Apply drift include/exclude patterns from the project's source block
+	if len(theProject.DriftIncludePatterns) > 0 || len(theProject.DriftExcludePatterns) > 0 {
+		if !dg_configuration.MatchIncludeExcludePatternsToFile(theProject.Dir, theProject.DriftIncludePatterns, theProject.DriftExcludePatterns) {
+			log.Printf("Project %v dir %v excluded by block-level drift patterns, skipping", project.Name, theProject.Dir)
+			c.String(http.StatusOK, "project excluded by block-level drift patterns")
+			return
+		}
+	}
+
 	projects := []dg_configuration.Project{*theProject}
 
 	jobsForImpactedProjects, err := generic.CreateJobsForProjects(projects, command, "drift", repoFullName, "digger", config.Workflows, &issueNumber, nil, branch, branch, false)

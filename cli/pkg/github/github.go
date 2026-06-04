@@ -221,6 +221,12 @@ func GitHubCI(lock core_locking.Lock, policyCheckerProvider core_policy.PolicyCh
 					continue
 				}
 			}
+			if len(projectConfig.DriftIncludePatterns) > 0 || len(projectConfig.DriftExcludePatterns) > 0 {
+				if !digger_config.MatchIncludeExcludePatternsToFile(projectConfig.Dir, projectConfig.DriftIncludePatterns, projectConfig.DriftExcludePatterns) {
+					slog.Info("Project excluded by block-level drift patterns, skipping", "project", projectConfig.Name, "dir", projectConfig.Dir, "block", projectConfig.BlockName)
+					continue
+				}
+			}
 			workflow := diggerConfig.Workflows[projectConfig.Workflow]
 
 			stateEnvVars, commandEnvVars := digger_config.CollectTerraformEnvConfig(workflow.EnvVars, true)

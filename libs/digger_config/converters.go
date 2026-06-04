@@ -104,6 +104,8 @@ func copyProjects(projects []*ProjectYaml) []Project {
 			awsCognitoOidc,
 			p.Generated,
 			workspace,
+			p.DriftIncludePatterns,
+			p.DriftExcludePatterns,
 		}
 		result[i] = item
 	}
