@@ -248,7 +248,16 @@ func run(command string, job orchestrator.Job, policyChecker policy.Checker, org
 	var iacUtils iac_utils.IacUtils
 	projectPath := path.Join(workingDir, job.ProjectDir)
 	if job.Terragrunt {
-		terraformExecutor = execution.Terragrunt{WorkingDir: projectPath}
+		var driftParallelism *int
+		if command == "digger drift-detect" {
+			driftParallelism = job.DriftTerragruntParallelism
+		}
+		terraformExecutor = execution.Terragrunt{WorkingDir: projectPath, Parallelism: driftParallelism}
+		if driftParallelism != nil {
+			slog.Info("drift_terragrunt_parallelism enabled",
+				"projectName", job.ProjectName,
+				"parallelism", *driftParallelism)
+		}
 		iacUtils = iac_utils.TerraformUtils{}
 	} else if job.OpenTofu {
 		terraformExecutor = execution.OpenTofu{WorkingDir: projectPath, Workspace: job.ProjectWorkspace}
@@ -680,7 +689,16 @@ func RunJob(
 		var iacUtils iac_utils.IacUtils
 		projectPath := path.Join(workingDir, job.ProjectDir)
 		if job.Terragrunt {
-			terraformExecutor = execution.Terragrunt{WorkingDir: projectPath}
+			var driftParallelism *int
+			if command == "digger drift-detect" {
+				driftParallelism = job.DriftTerragruntParallelism
+			}
+			terraformExecutor = execution.Terragrunt{WorkingDir: projectPath, Parallelism: driftParallelism}
+			if driftParallelism != nil {
+				slog.Info("drift_terragrunt_parallelism enabled",
+					"projectName", job.ProjectName,
+					"parallelism", *driftParallelism)
+			}
 			iacUtils = iac_utils.TerraformUtils{}
 		} else if job.OpenTofu {
 			terraformExecutor = execution.OpenTofu{WorkingDir: projectPath, Workspace: job.ProjectWorkspace}

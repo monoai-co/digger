@@ -33,10 +33,11 @@ type DiggerConfig struct {
 	ReportTerraformOutputs        bool
 	DriftExcludePatterns          []string
 	DriftIncludePatterns          []string
+	DriftTerragruntParallelism    *int
 }
 
 type ReporterConfig struct {
-	AiSummary bool
+	AiSummary       bool
 	CommentsEnabled bool
 }
 
@@ -51,29 +52,30 @@ type AssumeRoleForProject struct {
 }
 
 type Project struct {
-	BlockName            string // the block name if this is a generated project
-	Name                 string
-	Branch               string
-	Alias                string
-	ApplyRequirements    []string
-	Dir                  string
-	Workspace            string
-	Terragrunt           bool
-	Layer                uint
-	OpenTofu             bool
-	Pulumi               bool
-	Workflow             string
-	WorkflowFile         string
-	IncludePatterns      []string
-	ExcludePatterns      []string
-	DependencyProjects   []string
-	DriftDetection       bool
-	AwsRoleToAssume      *AssumeRoleForProject
-	AwsCognitoOidcConfig *AwsCognitoOidcConfig
-	Generated            bool
-	PulumiStack          string
-	DriftIncludePatterns []string
-	DriftExcludePatterns []string
+	BlockName                  string // the block name if this is a generated project
+	Name                       string
+	Branch                     string
+	Alias                      string
+	ApplyRequirements          []string
+	Dir                        string
+	Workspace                  string
+	Terragrunt                 bool
+	Layer                      uint
+	OpenTofu                   bool
+	Pulumi                     bool
+	Workflow                   string
+	WorkflowFile               string
+	IncludePatterns            []string
+	ExcludePatterns            []string
+	DependencyProjects         []string
+	DriftDetection             bool
+	AwsRoleToAssume            *AssumeRoleForProject
+	AwsCognitoOidcConfig       *AwsCognitoOidcConfig
+	Generated                  bool
+	PulumiStack                string
+	DriftIncludePatterns       []string
+	DriftExcludePatterns       []string
+	DriftTerragruntParallelism *int
 }
 
 type Workflow struct {
