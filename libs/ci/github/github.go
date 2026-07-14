@@ -742,8 +742,22 @@ func (svc GithubService) isBlockedOnlyByDiggerApply(headSHA string) (bool, error
 		return false, fmt.Errorf("could not get check runs for commit %v: %v", headSHA, err)
 	}
 
+	// GitHub's branch protection docs state that a required status check passes with a
+	// "successful, skipped, or neutral" conclusion — not "success" alone:
+	// https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
+	// ("Required status checks must have a successful, skipped, or neutral status before
+	// collaborators can make changes to a protected branch."). Matching only "success" here
+	// caused digger/apply to stay blocked even when every other required check had
+	// legitimately concluded "skipped" or "neutral" (e.g. a scanner that doesn't run on this
+	// PR but is still marked required).
+	passingConclusions := map[string]bool{
+		"success": true,
+		"skipped": true,
+		"neutral": true,
+	}
+
 	for _, run := range checkRuns {
-		if run.GetConclusion() == "success" {
+		if passingConclusions[run.GetConclusion()] {
 			continue
 		}
 		if strings.HasPrefix(run.GetName(), "digger/apply") {
