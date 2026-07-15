@@ -880,6 +880,12 @@ func (svc GithubService) isBlockedOnlyByDiggerApply(prNumber int) (bool, error) 
 		return false, fmt.Errorf("could not get required check contexts for PR %v: %v", prNumber, err)
 	}
 
+	return blockedOnlyByDiggerApply(contexts), nil
+}
+
+// blockedOnlyByDiggerApply is the pure decision logic behind isBlockedOnlyByDiggerApply,
+// separated out so it can be unit tested without a live GitHub API call.
+func blockedOnlyByDiggerApply(contexts []requiredCheckContext) bool {
 	// GitHub's branch protection docs state that a required status check passes with a
 	// "successful, skipped, or neutral" conclusion — not "success" alone:
 	// https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
@@ -907,10 +913,10 @@ func (svc GithubService) isBlockedOnlyByDiggerApply(prNumber int) (bool, error) 
 			continue
 		}
 		slog.Debug("PR blocked by non-digger required check", "check", ctx.Name, "state", ctx.State)
-		return false, nil
+		return false
 	}
 
-	return true, nil
+	return true
 }
 
 func (svc GithubService) IsMerged(prNumber int) (bool, error) {
