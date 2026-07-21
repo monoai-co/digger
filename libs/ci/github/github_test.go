@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/diggerhq/digger/libs/digger_config"
+	"github.com/google/go-github/v61/github"
+	"github.com/migueleliasweb/go-github-mock/src/mock"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -120,4 +122,51 @@ func TestFindAllChangedFilesOfPR(t *testing.T) {
 	files, _ := githubPrService.GetChangedFiles(98)
 	// 45 changed files including 1 renamed file so the previous filename is included
 	assert.Equal(t, 46, len(files))
+}
+
+func TestGetApprovalsPaginatesBeyondFirstPage(t *testing.T) {
+	// Regression test for PRs with >30 reviews: automated tools can post
+	// dozens of COMMENTED reviews before any human approves, pushing the
+	// real approvals past GitHub's default page size (30). GetApprovals
+	// must paginate, and its latest-state-per-user logic must span pages:
+	//  - alice: CHANGES_REQUESTED on page 1, APPROVED on page 2 -> approver
+	//  - bob:   APPROVED on page 1, CHANGES_REQUESTED on page 2 -> NOT an approver
+	//  - carol: APPROVED on page 2 only -> approver
+	review := func(user, state string) *github.PullRequestReview {
+		return &github.PullRequestReview{
+			User:  &github.User{Login: github.String(user)},
+			State: github.String(state),
+		}
+	}
+
+	pageOne := make([]*github.PullRequestReview, 0, 33)
+	for i := 0; i < 31; i++ {
+		pageOne = append(pageOne, review("review-bot", "COMMENTED"))
+	}
+	pageOne = append(pageOne, review("alice", "CHANGES_REQUESTED"), review("bob", "APPROVED"))
+
+	pageTwo := []*github.PullRequestReview{
+		review("alice", "APPROVED"),
+		review("bob", "CHANGES_REQUESTED"),
+		review("carol", "APPROVED"),
+	}
+
+	mockedHTTPClient := mock.NewMockedHTTPClient(
+		mock.WithRequestMatchPages(
+			mock.GetReposPullsReviewsByOwnerByRepoByPullNumber,
+			pageOne,
+			pageTwo,
+		),
+	)
+
+	svc := GithubService{
+		Client:   github.NewClient(mockedHTTPClient),
+		Owner:    "diggerhq",
+		RepoName: "digger",
+	}
+
+	approvals, err := svc.GetApprovals(1)
+
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "carol"}, approvals)
 }

@@ -245,9 +245,21 @@ func (svc GithubService) GetComments(prNumber int) ([]ci.Comment, error) {
 }
 
 func (svc GithubService) GetApprovals(prNumber int) ([]string, error) {
-	reviews, _, err := svc.Client.PullRequests.ListReviews(context.Background(), svc.Owner, svc.RepoName, prNumber, &github.ListOptions{})
-	if err != nil {
-		return nil, err
+	// Paginate through all reviews: GitHub returns at most 30 per page by
+	// default, so a PR with 30+ reviews (e.g. automated per-file COMMENTED
+	// reviews) would otherwise hide approvals submitted after the first page.
+	reviews := make([]*github.PullRequestReview, 0)
+	opts := &github.ListOptions{PerPage: 100}
+	for {
+		reviewsPage, resp, err := svc.Client.PullRequests.ListReviews(context.Background(), svc.Owner, svc.RepoName, prNumber, opts)
+		if err != nil {
+			return nil, err
+		}
+		reviews = append(reviews, reviewsPage...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 
 	// Track the latest review state per user
