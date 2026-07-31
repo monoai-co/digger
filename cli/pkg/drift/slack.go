@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+
+	core_drift "github.com/diggerhq/digger/cli/pkg/core/drift"
 )
 
 type SlackNotification struct {
@@ -36,13 +38,18 @@ func SplitCodeBlocks(message string) []string {
 	return res
 }
 
-func (slack *SlackNotification) SendNotificationForProject(projectName string, repoFullName string, plan string) error {
+func (slack *SlackNotification) SendNotificationForProject(projectName string, repoFullName string, plan string, lastChange *core_drift.LastChange) error {
+	lastChangeLine := ""
+	if lastChange != nil {
+		lastChangeLine = fmt.Sprintf(":bust_in_silhouette: *Last change by:* %s (`%s`, %s)\n\n", lastChange.Author, lastChange.Commit, lastChange.When)
+	}
 	message := fmt.Sprintf(
 		":warning: *Infrastructure Drift Detected* :warning:\n\n"+
 			":file_folder: *Project:* `%s`\n"+
 			":books: *Repository:* `%s`\n\n"+
+			"%s"+
 			":memo: *Terraform Plan:*\n```\n%v\n```\n\n",
-		projectName, repoFullName, plan,
+		projectName, repoFullName, lastChangeLine, plan,
 	)
 	parts := SplitCodeBlocks(message)
 	for _, part := range parts {

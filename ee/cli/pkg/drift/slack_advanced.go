@@ -2,6 +2,7 @@ package drift
 
 import (
 	"fmt"
+	core_drift "github.com/diggerhq/digger/cli/pkg/core/drift"
 	"github.com/diggerhq/digger/cli/pkg/drift"
 	"github.com/diggerhq/digger/libs/comment_utils"
 	"strings"
@@ -11,17 +12,20 @@ type SlackAdvancedAggregatedNotificationWithAiSummary struct {
 	Url          string
 	RepoFullName string
 	projectNames []string
+	lastChanges  map[string]*core_drift.LastChange
 }
 
 func NewSlackAdvancedAggregatedNotificationWithAiSummary(url string) *SlackAdvancedAggregatedNotificationWithAiSummary {
 	return &SlackAdvancedAggregatedNotificationWithAiSummary{
 		Url:          url,
 		projectNames: make([]string, 0),
+		lastChanges:  make(map[string]*core_drift.LastChange),
 	}
 }
 
-func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) SendNotificationForProject(projectName string, repoFullName string, plan string) error {
+func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) SendNotificationForProject(projectName string, repoFullName string, plan string, lastChange *core_drift.LastChange) error {
 	slack.projectNames = append(slack.projectNames, projectName)
+	slack.lastChanges[projectName] = lastChange
 	slack.RepoFullName = repoFullName
 	return nil
 }
@@ -49,7 +53,11 @@ func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) Flush() error {
 	}
 	var projectList strings.Builder
 	for _, projectName := range projectNamesCompact {
-		projectList.WriteString(fmt.Sprintf("• `%s`\n", projectName))
+		if lc := slack.lastChanges[projectName]; lc != nil {
+			projectList.WriteString(fmt.Sprintf("• `%s` — last change by %s (`%s`, %s)\n", projectName, lc.Author, lc.Commit, lc.When))
+		} else {
+			projectList.WriteString(fmt.Sprintf("• `%s`\n", projectName))
+		}
 	}
 
 	if len(slack.projectNames) > 50 {

@@ -2,6 +2,7 @@ package drift
 
 import (
     "fmt"
+    core_drift "github.com/diggerhq/digger/cli/pkg/core/drift"
     orchestrator "github.com/diggerhq/digger/libs/ci"
     "github.com/samber/lo"
     "log"
@@ -12,10 +13,14 @@ type GithubIssueNotification struct {
     RelatedPrNumber *int64
 }
 
-func (ghi *GithubIssueNotification) SendNotificationForProject(projectName string, repoFullName string, plan string) error {
+func (ghi *GithubIssueNotification) SendNotificationForProject(projectName string, repoFullName string, plan string, lastChange *core_drift.LastChange) error {
     log.Printf("Info: Sending drift notification regarding project: %v", projectName)
     title := fmt.Sprintf("Drift detected in project: %v", projectName)
-    message := fmt.Sprintf(":bangbang: Drift detected in digger project %v details below: \n\n```\n%v\n```", projectName, plan)
+    lastChangeLine := ""
+    if lastChange != nil {
+        lastChangeLine = fmt.Sprintf("\n\nLast change by **%v** (`%v`, %v)", lastChange.Author, lastChange.Commit, lastChange.When)
+    }
+    message := fmt.Sprintf(":bangbang: Drift detected in digger project %v%v details below: \n\n```\n%v\n```", projectName, lastChangeLine, plan)
     const maxLen = 65536
     const truncMsg = "\n\n> ⚠️ Output truncated: plan exceeds GitHub's 65536 character limit. See job logs for full output."
     if len(message) > maxLen {
