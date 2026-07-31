@@ -21,6 +21,9 @@ jobs:
   detect-drift:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # required for last change attribution
       - name: digger drift detection
         uses: diggerhq/digger@vLatest
         with:
@@ -31,3 +34,11 @@ jobs:
           GITHUB_CONTEXT: ${{ toJson(github) }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+## Last change attribution
+
+When drift is detected, the notification includes who last changed the project's directory, taken from `git log` on the runner:
+
+> :bust_in_silhouette: **Last change by:** Jane Doe (`abc1234`, 3 days ago)
+
+This requires full git history in the checkout — set `fetch-depth: 0` on `actions/checkout` as shown above. On a shallow clone the attribution line is skipped and the notification is sent without it.

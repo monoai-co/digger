@@ -26,3 +26,4 @@ env:
 
 - Ensure the token has permission to create issues in the repository.
 - The issue records the project(s) with drift and links back to context for quick follow-up.
+- The issue also names who last changed the drifted project's directory (from `git log`). This requires full git history — set `fetch-depth: 0` on `actions/checkout` in the drift workflow. On a shallow clone the attribution is skipped.
