@@ -60,3 +60,29 @@ func TestGetLastChangeFailsOutsideGitRepo(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, lastChange)
 }
+
+func TestGetLastChangeRefusesShallowClone(t *testing.T) {
+	origin := t.TempDir()
+	gitRun(t, origin, "Alice", "alice@example.com", "init", "--bare")
+
+	seed := t.TempDir()
+	gitRun(t, seed, "Alice", "alice@example.com", "clone", origin, "seed")
+	seedRepo := filepath.Join(seed, "seed")
+	require.NoError(t, os.MkdirAll(filepath.Join(seedRepo, "projects", "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(seedRepo, "projects", "a", "main.tf"), []byte("# v1\n"), 0o644))
+	gitRun(t, seedRepo, "Alice", "alice@example.com", "add", ".")
+	gitRun(t, seedRepo, "Alice", "alice@example.com", "commit", "-m", "first")
+	require.NoError(t, os.WriteFile(filepath.Join(seedRepo, "projects", "a", "main.tf"), []byte("# v2\n"), 0o644))
+	gitRun(t, seedRepo, "Bob", "bob@example.com", "add", ".")
+	gitRun(t, seedRepo, "Bob", "bob@example.com", "commit", "-m", "second")
+	gitRun(t, seedRepo, "Bob", "bob@example.com", "push", "origin", "HEAD")
+
+	shallowParent := t.TempDir()
+	gitRun(t, shallowParent, "Carol", "carol@example.com", "clone", "--depth", "1", "file://"+origin, "shallow")
+	shallowProject := filepath.Join(shallowParent, "shallow", "projects", "a")
+
+	lastChange, err := GetLastChange(shallowProject)
+	assert.Error(t, err)
+	assert.Nil(t, lastChange)
+	assert.Contains(t, err.Error(), "shallow clone")
+}

@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	core_drift "github.com/diggerhq/digger/cli/pkg/core/drift"
 )
@@ -27,6 +30,10 @@ const (
 
 	defaultSlackApiBase = "https://slack.com/api"
 )
+
+// Pause between thread replies: Slack allows roughly one chat.postMessage
+// per second per channel. Package-level so tests can zero it.
+var threadPostInterval = time.Second
 
 type SlackNotification struct {
 	Url string
@@ -64,36 +71,60 @@ func SplitCodeBlocks(message string) []string {
 	return res
 }
 
+// cutAtRuneBoundary slices s to at most max bytes without splitting a
+// multi-byte UTF-8 rune.
+func cutAtRuneBoundary(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
+
+// sanitizeFences breaks up ``` sequences inside plan text (heredocs, string
+// values) with a zero-width space so they cannot terminate the enclosing
+// Slack code block early.
+func sanitizeFences(s string) string {
+	return strings.ReplaceAll(s, "```", "`\u200b``")
+}
+
 // TruncatePlan cuts plan down to at most maxChars characters (at a line
 // boundary where possible) and appends a note saying how much was omitted.
 func TruncatePlan(plan string, maxChars int) (string, bool) {
 	if len(plan) <= maxChars {
 		return plan, false
 	}
-	cut := plan[:maxChars]
-	if idx := strings.LastIndex(cut, "\n"); idx > 0 {
+	cut := cutAtRuneBoundary(plan, maxChars)
+	// only retreat to a line boundary when it doesn't throw away most of the
+	// window (a plan can be one giant line, e.g. jsonencode output)
+	if idx := strings.LastIndex(cut, "\n"); idx >= maxChars/2 {
 		cut = cut[:idx]
 	}
 	omitted := len(plan) - len(cut)
 	return cut + fmt.Sprintf("\n... plan truncated (%d of %d characters shown, %d omitted) — full plan in the workflow logs", len(cut), len(plan), omitted), true
 }
 
-// splitIntoFencedChunks splits text into chunks of at most chunkSize
-// characters at line boundaries, each wrapped in a ``` code fence.
+// splitIntoFencedChunks splits text into chunks at line boundaries, each
+// wrapped in a ``` code fence. Chunks including their fences stay within
+// chunkSize characters.
 func splitIntoFencedChunks(text string, chunkSize int) []string {
+	budget := chunkSize - len("```\n") - len("\n```")
 	var chunks []string
 	var part strings.Builder
 	for _, line := range strings.Split(text, "\n") {
 		// oversized single line: hard-split it
-		for len(line) > chunkSize {
+		for len(line) > budget {
 			if part.Len() > 0 {
 				chunks = append(chunks, "```\n"+part.String()+"\n```")
 				part.Reset()
 			}
-			chunks = append(chunks, "```\n"+line[:chunkSize]+"\n```")
-			line = line[chunkSize:]
+			head := cutAtRuneBoundary(line, budget)
+			chunks = append(chunks, "```\n"+head+"\n```")
+			line = line[len(head):]
 		}
-		if part.Len()+len(line)+1 > chunkSize && part.Len() > 0 {
+		if part.Len()+len(line)+1 > budget && part.Len() > 0 {
 			chunks = append(chunks, "```\n"+part.String()+"\n```")
 			part.Reset()
 		}
@@ -137,7 +168,7 @@ func (slack *SlackNotification) SendNotificationForProject(projectName string, r
 	if truncated {
 		slog.Warn("drift plan truncated for slack webhook notification", "project", projectName)
 	}
-	message := header + fmt.Sprintf(":memo: *Terraform Plan:*\n```\n%v\n```\n\n", plan)
+	message := header + fmt.Sprintf(":memo: *Terraform Plan:*\n```\n%v\n```\n\n", sanitizeFences(plan))
 	parts := SplitCodeBlocks(message)
 	for _, part := range parts {
 		err := SendSlackMessage(slack.Url, part)
@@ -162,7 +193,11 @@ func (slack *SlackNotification) sendThreaded(header string, plan string) error {
 	if truncated {
 		slog.Warn("drift plan truncated for slack thread notification")
 	}
-	for _, chunk := range splitIntoFencedChunks(plan, slackMessageLimit) {
+	for i, chunk := range splitIntoFencedChunks(sanitizeFences(plan), slackMessageLimit) {
+		if i > 0 {
+			// stay under Slack's ~1 message/second/channel posting limit
+			time.Sleep(threadPostInterval)
+		}
 		if _, err := slack.postMessage(chunk, ts); err != nil {
 			return err
 		}
@@ -171,7 +206,8 @@ func (slack *SlackNotification) sendThreaded(header string, plan string) error {
 }
 
 // postMessage calls chat.postMessage; when threadTs is non-empty the message
-// is posted as a reply in that thread. Returns the created message's ts.
+// is posted as a reply in that thread. Retries on 429 honoring Retry-After.
+// Returns the created message's ts.
 func (slack *SlackNotification) postMessage(text string, threadTs string) (string, error) {
 	apiBase := slack.ApiBase
 	if apiBase == "" {
@@ -190,35 +226,51 @@ func (slack *SlackNotification) postMessage(text string, threadTs string) (strin
 		return "", fmt.Errorf("failed to marshal slack message: %v", err)
 	}
 
-	request, err := http.NewRequest("POST", apiBase+"/chat.postMessage", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create slack request: %v", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+slack.BotToken)
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		request, err := http.NewRequest("POST", apiBase+"/chat.postMessage", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return "", fmt.Errorf("failed to create slack request: %v", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+slack.BotToken)
 
-	resp, err := (&http.Client{}).Do(request)
-	if err != nil {
-		return "", fmt.Errorf("failed to send slack request: %v", err)
-	}
-	defer resp.Body.Close()
+		resp, err := (&http.Client{}).Do(request)
+		if err != nil {
+			return "", fmt.Errorf("failed to send slack request: %v", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return "", fmt.Errorf("failed to read slack response: %v", readErr)
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read slack response: %v", err)
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < maxAttempts {
+			delay := 2 * time.Second
+			if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 && secs <= 30 {
+				delay = time.Duration(secs) * time.Second
+			}
+			slog.Warn("slack rate limited, retrying", "attempt", attempt, "delay", delay)
+			time.Sleep(delay)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("slack api returned status %v: %s", resp.Status, body)
+		}
+
+		var apiResp struct {
+			Ok    bool   `json:"ok"`
+			Ts    string `json:"ts"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &apiResp); err != nil {
+			return "", fmt.Errorf("failed to parse slack response: %v", err)
+		}
+		if !apiResp.Ok {
+			return "", fmt.Errorf("slack api error: %v", apiResp.Error)
+		}
+		return apiResp.Ts, nil
 	}
-	var apiResp struct {
-		Ok    bool   `json:"ok"`
-		Ts    string `json:"ts"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to parse slack response: %v", err)
-	}
-	if !apiResp.Ok {
-		return "", fmt.Errorf("slack api error: %v", apiResp.Error)
-	}
-	return apiResp.Ts, nil
 }
 
 func (slack *SlackNotification) SendErrorNotificationForProject(projectName string, repoFullName string, err error) error {

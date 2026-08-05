@@ -9,10 +9,20 @@ import (
 )
 
 // GetLastChange returns the most recent commit that touched projectPath.
-// The checkout must have history (actions/checkout with fetch-depth: 0);
-// on a shallow clone git may find no commit for the path, which is
-// returned as an error and should be treated as non-fatal by callers.
+// The checkout must have full history (actions/checkout with fetch-depth: 0).
+// Shallow clones are refused outright: their grafted tip commit diffs
+// against the empty tree, so `git log -- .` would blame whoever made the
+// repo's latest commit for every project. Errors are non-fatal to callers.
 func GetLastChange(projectPath string) (*core_drift.LastChange, error) {
+	shallowCmd := exec.Command("git", "rev-parse", "--is-shallow-repository")
+	shallowCmd.Dir = projectPath
+	shallowOut, err := shallowCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse failed for %v: %v", projectPath, err)
+	}
+	if strings.TrimSpace(string(shallowOut)) == "true" {
+		return nil, fmt.Errorf("shallow clone detected for %v: last change attribution needs full git history (checkout with fetch-depth: 0)", projectPath)
+	}
 	// %x1f is the ASCII unit separator: unlike "|" it cannot appear in
 	// author names or emails, so fields always split cleanly.
 	cmd := exec.Command("git", "log", "-1", "--format=%an%x1f%ae%x1f%h%x1f%ar", "--", ".")

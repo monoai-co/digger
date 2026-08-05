@@ -18,6 +18,9 @@ func (d DriftNotificationProviderBasic) Get(prService ci.PullRequestService) (co
 	slackBotToken := os.Getenv("INPUT_DRIFT_DETECTION_SLACK_BOT_TOKEN")
 	slackChannel := os.Getenv("INPUT_DRIFT_DETECTION_SLACK_CHANNEL")
 	githubIssues := os.Getenv("INPUT_DRIFT_GITHUB_ISSUES")
+	if (slackBotToken != "") != (slackChannel != "") {
+		return nil, fmt.Errorf("threaded slack notifications need both INPUT_DRIFT_DETECTION_SLACK_BOT_TOKEN and INPUT_DRIFT_DETECTION_SLACK_CHANNEL, but only one is set")
+	}
 	var notification core_drift.Notification
 	if slackNotificationUrl != "" || (slackBotToken != "" && slackChannel != "") {
 		notification = &SlackNotification{Url: slackNotificationUrl, BotToken: slackBotToken, Channel: slackChannel}

@@ -7,7 +7,7 @@ In Backendless mode, drift detection runs in GitHub Actions and sends notificati
 
 ## Configure Slack webhook input
 
-Pass `drift-detection-slack-notification-url` to the action:
+Create an [incoming webhook](https://api.slack.com/messaging/webhooks) for your Slack workspace, save its URL as a repository secret named `SLACK_WEBHOOK_URL` (Settings > Secrets and variables > Actions), then pass `drift-detection-slack-notification-url` to the action:
 
 ```yml
 name: Drift Detection
@@ -29,6 +29,7 @@ jobs:
         with:
           mode: drift-detection
           no-backend: true
+          configure-checkout: false # keep the full-history checkout above
           drift-detection-slack-notification-url: ${{ secrets.SLACK_WEBHOOK_URL }}
         env:
           GITHUB_CONTEXT: ${{ toJson(github) }}
@@ -39,13 +40,13 @@ jobs:
 
 When drift is detected, the notification includes who last changed the project's directory, taken from `git log` on the runner:
 
-> :bust_in_silhouette: **Last change by:** Jane Doe (`abc1234`, 3 days ago)
+> 👤 **Last change by:** Jane Doe (`abc1234`, 3 days ago)
 
-This requires full git history in the checkout — set `fetch-depth: 0` on `actions/checkout` as shown above. On a shallow clone the attribution line is skipped and the notification is sent without it.
+This requires full git history in the checkout — set `fetch-depth: 0` on `actions/checkout` **and** `configure-checkout: false` on the digger step, as shown above. Without `configure-checkout: false` the action performs its own shallow checkout, which discards the history you just fetched. On a shallow clone the attribution line is skipped and the notification is sent without it.
 
 ## Threaded plans (recommended for large plans)
 
-Incoming webhooks cannot post threaded replies, so in webhook mode the plan is truncated at 12,000 characters and split across a few messages. For large plans, use a Slack bot token instead — the channel gets a single summary message and the full plan (up to 40,000 characters) goes into its thread:
+Incoming webhooks cannot post threaded replies, so in webhook mode the plan is truncated at 12,000 characters and split across a few messages. For large plans, use a Slack bot token instead — the channel gets a single summary message and the plan (up to 40,000 characters, split into ~4,000-character replies) goes into its thread:
 
 ```yml
       - name: digger drift detection
@@ -53,6 +54,7 @@ Incoming webhooks cannot post threaded replies, so in webhook mode the plan is t
         with:
           mode: drift-detection
           no-backend: true
+          configure-checkout: false
           drift-detection-slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
           drift-detection-slack-channel: "C0123456789"
         env:
@@ -60,6 +62,13 @@ Incoming webhooks cannot post threaded replies, so in webhook mode the plan is t
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-To use this mode, create a Slack app with a bot token (`xoxb-...`) that has the `chat:write` scope, invite the bot to the channel, and pass the channel ID (not the channel name). If both a webhook URL and a bot token are configured, threaded mode takes precedence.
+To use this mode:
+
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps) and add the `chat:write` bot scope under OAuth & Permissions.
+2. Install the app to your workspace and copy the bot token (`xoxb-...`) into a repository secret named `SLACK_BOT_TOKEN`.
+3. Invite the bot to the target channel (`/invite @your-app`).
+4. Pass the channel ID, not the channel name — find it at the bottom of the channel's details modal.
+
+Both `drift-detection-slack-bot-token` and `drift-detection-slack-channel` must be set for threaded mode; if a webhook URL is configured alongside them, threaded mode takes precedence.
 
 Plans that exceed the limit are cut at a line boundary with a note saying how many characters were omitted; the full plan is always available in the workflow logs.

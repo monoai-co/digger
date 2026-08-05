@@ -70,7 +70,7 @@ func TestSplitIntoFencedChunksPreservesAllLines(t *testing.T) {
 	for _, c := range chunks {
 		assert.True(t, strings.HasPrefix(c, "```\n"))
 		assert.True(t, strings.HasSuffix(c, "\n```"))
-		assert.LessOrEqual(t, len(c), 4000+8)
+		assert.LessOrEqual(t, len(c), 4000) // fences included in the budget
 		total += strings.Count(c, "line of plan output")
 	}
 	assert.Equal(t, 500, total)
@@ -93,6 +93,7 @@ func TestSendNotificationThreadedPostsPlanInThread(t *testing.T) {
 	}))
 	defer server.Close()
 
+	threadPostInterval = 0 // no pacing sleeps in tests
 	notification := SlackNotification{BotToken: "xoxb-test", Channel: "C123", ApiBase: server.URL}
 	plan := strings.Repeat("aws_instance.web must be replaced\n", 300) // ~10k chars -> 3 thread chunks
 	lastChange := &core_drift.LastChange{Author: "Jane Doe", Email: "jane@example.com", Commit: "abc1234", When: "3 days ago"}
