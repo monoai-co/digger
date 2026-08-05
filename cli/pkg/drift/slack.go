@@ -20,9 +20,6 @@ const (
 	// Slack collapses messages beyond ~4000 characters, so larger content is
 	// split into parts of at most this size (pre-existing behaviour).
 	slackMessageLimit = 4000
-	// Max plan characters posted directly to a channel via an incoming
-	// webhook. Webhooks cannot thread replies, so this bounds channel spam.
-	webhookPlanLimit = 12000
 	// Max plan characters posted as threaded replies via a bot token. Slack
 	// rejects single messages above 40000 chars; threads keep the channel to
 	// one message, so the cap here bounds the number of replies instead.
@@ -142,12 +139,12 @@ func splitIntoFencedChunks(text string, chunkSize int) []string {
 func driftHeader(projectName string, repoFullName string, lastChange *core_drift.LastChange) string {
 	lastChangeLine := ""
 	if lastChange != nil {
-		lastChangeLine = fmt.Sprintf(":bust_in_silhouette: *Last change by:* %s (`%s`, %s)\n\n", lastChange.Author, lastChange.Commit, lastChange.When)
+		lastChangeLine = fmt.Sprintf("*Last change by:* %s (`%s`, %s)\n", lastChange.Author, lastChange.Commit, lastChange.When)
 	}
 	return fmt.Sprintf(
 		":warning: *Infrastructure Drift Detected* :warning:\n\n"+
-			":file_folder: *Project:* `%s`\n"+
-			":books: *Repository:* `%s`\n\n"+
+			"*Project:* `%s`\n"+
+			"*Repository:* `%s`\n"+
 			"%s",
 		projectName, repoFullName, lastChangeLine,
 	)
@@ -157,6 +154,10 @@ func (slack *SlackNotification) useThreads() bool {
 	return slack.BotToken != "" && slack.Channel != ""
 }
 
+// SendNotificationForProject sends a compact summary per drifted project.
+// The plan itself never goes into the channel — with many repos and
+// projects that becomes pure noise — it is either posted into the summary
+// message's thread (bot-token mode) or left in the workflow logs.
 func (slack *SlackNotification) SendNotificationForProject(projectName string, repoFullName string, plan string, lastChange *core_drift.LastChange) error {
 	header := driftHeader(projectName, repoFullName, lastChange)
 
@@ -164,27 +165,18 @@ func (slack *SlackNotification) SendNotificationForProject(projectName string, r
 		return slack.sendThreaded(header, plan)
 	}
 
-	plan, truncated := TruncatePlan(plan, webhookPlanLimit)
-	if truncated {
-		slog.Warn("drift plan truncated for slack webhook notification", "project", projectName)
+	message := header + "\n_Full Terraform plan in the workflow logs._"
+	err := SendSlackMessage(slack.Url, message)
+	if err != nil {
+		slog.Error("failed to send slack drift request", "error", err)
 	}
-	message := header + fmt.Sprintf(":memo: *Terraform Plan:*\n```\n%v\n```\n\n", sanitizeFences(plan))
-	parts := SplitCodeBlocks(message)
-	for _, part := range parts {
-		err := SendSlackMessage(slack.Url, part)
-		if err != nil {
-			slog.Error("failed to send slack drift request", "error", err)
-			return err
-		}
-	}
-
-	return nil
+	return err
 }
 
 // sendThreaded posts the header to the channel and the plan as replies in
 // its thread, so the channel only ever sees a single message per project.
 func (slack *SlackNotification) sendThreaded(header string, plan string) error {
-	ts, err := slack.postMessage(header+":memo: *Terraform Plan in thread* :thread:", "")
+	ts, err := slack.postMessage(header+"\n_Terraform plan in thread._", "")
 	if err != nil {
 		return err
 	}
@@ -275,10 +267,10 @@ func (slack *SlackNotification) postMessage(text string, threadTs string) (strin
 
 func (slack *SlackNotification) SendErrorNotificationForProject(projectName string, repoFullName string, err error) error {
 	message := fmt.Sprintf(
-		":rotating_light: *Error While Drift Processing* :rotating_light:\n\n"+
-			":file_folder: *Project:* `%s`\n"+
-			":books: *Repository:* `%s`\n\n"+
-			":warning: *Error Details:*\n```\n%v\n```\n\n"+
+		":warning: *Error While Drift Processing* :warning:\n\n"+
+			"*Project:* `%s`\n"+
+			"*Repository:* `%s`\n\n"+
+			"*Error Details:*\n```\n%v\n```\n\n"+
 			"_Please check the workflow logs for more information._",
 		projectName, repoFullName, err,
 	)

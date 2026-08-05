@@ -32,10 +32,10 @@ func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) SendNotificationF
 
 func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) SendErrorNotificationForProject(projectName string, repoFullName string, err error) error {
 	message := fmt.Sprintf(
-		":rotating_light: *Error While Drift Processing* :rotating_light:\n\n"+
-			":file_folder: *Project:* `%s`\n"+
-			":books: *Repository:* `%s`\n\n"+
-			":warning: *Error Details:*\n```\n%v\n```\n\n"+
+		":warning: *Error While Drift Processing* :warning:\n\n"+
+			"*Project:* `%s`\n"+
+			"*Repository:* `%s`\n\n"+
+			"*Error Details:*\n```\n%v\n```\n\n"+
 			"_Please check the workflow logs for more information._",
 		projectName, repoFullName, err,
 	)
@@ -68,7 +68,7 @@ func (slack *SlackAdvancedAggregatedNotificationWithAiSummary) Flush() error {
 		":warning: *Drift Detected* :warning:\n\n"+
 			"*Repository:* `%s`\n\n"+
 			"*Affected Digger Projects:*\n%s\n"+
-			":link: <<%s|View Workflow>>",
+			"<<%s|View Workflow>>",
 		slack.RepoFullName,
 		projectList.String(),
 		comment_utils.GetWorkflowUrl(),

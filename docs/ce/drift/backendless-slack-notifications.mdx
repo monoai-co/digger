@@ -36,17 +36,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+Each drifted project produces one compact summary message — project, repository, and who last changed it. The Terraform plan itself is never posted to the channel; find it in the workflow logs, or use [threaded plans](#threaded-plans) to post it in the message's thread.
+
 ## Last change attribution
 
 When drift is detected, the notification includes who last changed the project's directory, taken from `git log` on the runner:
 
-> 👤 **Last change by:** Jane Doe (`abc1234`, 3 days ago)
+> **Last change by:** Jane Doe (`abc1234`, 3 days ago)
 
 This requires full git history in the checkout — set `fetch-depth: 0` on `actions/checkout` **and** `configure-checkout: false` on the digger step, as shown above. Without `configure-checkout: false` the action performs its own shallow checkout, which discards the history you just fetched. On a shallow clone the attribution line is skipped and the notification is sent without it.
 
-## Threaded plans (recommended for large plans)
+## Threaded plans
 
-Incoming webhooks cannot post threaded replies, so in webhook mode the plan is truncated at 12,000 characters and split across a few messages. For large plans, use a Slack bot token instead — the channel gets a single summary message and the plan (up to 40,000 characters, split into ~4,000-character replies) goes into its thread:
+To see the plan in Slack without adding channel noise, use a Slack bot token instead of a webhook — the channel still gets only the summary message, and the plan (up to 40,000 characters, split into ~4,000-character replies) goes into its thread:
 
 ```yml
       - name: digger drift detection
@@ -71,4 +73,4 @@ To use this mode:
 
 Both `drift-detection-slack-bot-token` and `drift-detection-slack-channel` must be set for threaded mode; if a webhook URL is configured alongside them, threaded mode takes precedence.
 
-Plans that exceed the limit are cut at a line boundary with a note saying how many characters were omitted; the full plan is always available in the workflow logs.
+Plans that exceed the limit are cut at a line boundary with a note saying how many characters were omitted; the full plan is always available in the workflow logs regardless of mode.

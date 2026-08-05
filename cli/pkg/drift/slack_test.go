@@ -115,7 +115,7 @@ func TestSendNotificationThreadedPostsPlanInThread(t *testing.T) {
 	}
 }
 
-func TestSendNotificationWebhookTruncatesHugePlan(t *testing.T) {
+func TestSendNotificationWebhookSendsCompactSummaryWithoutPlan(t *testing.T) {
 	var payloads []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var m struct {
@@ -129,11 +129,18 @@ func TestSendNotificationWebhookTruncatesHugePlan(t *testing.T) {
 
 	notification := SlackNotification{Url: server.URL}
 	plan := strings.Repeat("resource \"random_string\" \"x\" will be created\n", 4000) // ~180k chars like a big monorepo plan
-	err := notification.SendNotificationForProject("big-project", "org/repo", plan, nil)
+	lastChange := &core_drift.LastChange{Author: "Jane Doe", Email: "jane@example.com", Commit: "abc1234", When: "3 days ago"}
+	err := notification.SendNotificationForProject("big-project", "org/repo", plan, lastChange)
 	assert.NoError(t, err)
 
-	// bounded: ~12k of plan split into 4k messages, not 45+ messages
-	assert.LessOrEqual(t, len(payloads), 5)
-	joined := strings.Join(payloads, "")
-	assert.Contains(t, joined, "plan truncated")
+	// exactly one compact message per project, plan never hits the channel
+	require.Equal(t, 1, len(payloads))
+	assert.NotContains(t, payloads[0], "random_string")
+	assert.Contains(t, payloads[0], "Last change by")
+	assert.Contains(t, payloads[0], "workflow logs")
+	// only the warning emoji survives
+	assert.Contains(t, payloads[0], ":warning:")
+	for _, emoji := range []string{":file_folder:", ":books:", ":memo:", ":bust_in_silhouette:"} {
+		assert.NotContains(t, payloads[0], emoji)
+	}
 }
