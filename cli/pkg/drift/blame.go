@@ -13,14 +13,16 @@ import (
 // on a shallow clone git may find no commit for the path, which is
 // returned as an error and should be treated as non-fatal by callers.
 func GetLastChange(projectPath string) (*core_drift.LastChange, error) {
-	cmd := exec.Command("git", "log", "-1", "--format=%an|%ae|%h|%ar", "--", ".")
+	// %x1f is the ASCII unit separator: unlike "|" it cannot appear in
+	// author names or emails, so fields always split cleanly.
+	cmd := exec.Command("git", "log", "-1", "--format=%an%x1f%ae%x1f%h%x1f%ar", "--", ".")
 	cmd.Dir = projectPath
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git log failed for %v: %v", projectPath, err)
 	}
 	line := strings.TrimSpace(string(out))
-	parts := strings.SplitN(line, "|", 4)
+	parts := strings.SplitN(line, "\x1f", 4)
 	if len(parts) < 4 || parts[0] == "" {
 		return nil, fmt.Errorf("no git history found for %v", projectPath)
 	}

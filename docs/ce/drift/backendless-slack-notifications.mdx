@@ -42,3 +42,24 @@ When drift is detected, the notification includes who last changed the project's
 > :bust_in_silhouette: **Last change by:** Jane Doe (`abc1234`, 3 days ago)
 
 This requires full git history in the checkout — set `fetch-depth: 0` on `actions/checkout` as shown above. On a shallow clone the attribution line is skipped and the notification is sent without it.
+
+## Threaded plans (recommended for large plans)
+
+Incoming webhooks cannot post threaded replies, so in webhook mode the plan is truncated at 12,000 characters and split across a few messages. For large plans, use a Slack bot token instead — the channel gets a single summary message and the full plan (up to 40,000 characters) goes into its thread:
+
+```yml
+      - name: digger drift detection
+        uses: diggerhq/digger@vLatest
+        with:
+          mode: drift-detection
+          no-backend: true
+          drift-detection-slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          drift-detection-slack-channel: "C0123456789"
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+To use this mode, create a Slack app with a bot token (`xoxb-...`) that has the `chat:write` scope, invite the bot to the channel, and pass the channel ID (not the channel name). If both a webhook URL and a bot token are configured, threaded mode takes precedence.
+
+Plans that exceed the limit are cut at a line boundary with a note saying how many characters were omitted; the full plan is always available in the workflow logs.
