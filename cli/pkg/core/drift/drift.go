@@ -4,7 +4,6 @@ package drift
 // directory, so drift notifications can point at who changed the code last.
 type LastChange struct {
 	Author string
-	Email  string
 	Commit string
 	When   string
 }

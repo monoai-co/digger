@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,31 +40,6 @@ type SlackNotification struct {
 	Channel  string
 	// Overridable for tests; defaults to https://slack.com/api
 	ApiBase string
-}
-
-func SplitCodeBlocks(message string) []string {
-	var res []string
-
-	if strings.Count(message, "```") < 2 {
-		res = append(res, message)
-		return res
-	}
-
-	regex := regexp.MustCompile("\n")
-	split := regex.Split(message, -1)
-	part := ""
-	for _, line := range split {
-		if len(part+line) > slackMessageLimit {
-			res = append(res, part+"\n"+line+"\n```")
-			part = "```\n" + line
-		} else {
-			part = part + "\n" + line
-		}
-	}
-	if len(part) > 0 {
-		res = append(res, part)
-	}
-	return res
 }
 
 // cutAtRuneBoundary slices s to at most max bytes without splitting a

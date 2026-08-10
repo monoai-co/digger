@@ -45,7 +45,6 @@ func TestGetLastChangeReturnsLastAuthorForProjectDir(t *testing.T) {
 	lastChangeA, err := GetLastChange(projectA)
 	assert.NoError(t, err)
 	assert.Equal(t, "Alice", lastChangeA.Author)
-	assert.Equal(t, "alice@example.com", lastChangeA.Email)
 	assert.NotEmpty(t, lastChangeA.Commit)
 	assert.NotEmpty(t, lastChangeA.When)
 
