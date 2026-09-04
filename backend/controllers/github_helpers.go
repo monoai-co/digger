@@ -248,42 +248,43 @@ func TriggerDiggerJobs(ciBackend ci_backends.CiBackend, repoFullName string, rep
 
 // recordDetectionRun persists a detection run for any trigger (PR or issue comment).
 func recordDetectionRun(
-    organisationId uint,
-    repoFullName string,
-    number int,
-    triggerType string,   // e.g. "pull_request" | "issue_comment"
-    triggerAction string, // e.g. PR action or "comment"
-    commitSha string,
-    defaultBranch string,
-    targetBranch string,
-    labels []string,
-    changedFiles []string,
-    impactedProjects []digger_config.Project,
-    impactedProjectsSourceMapping map[string]digger_config.ProjectToSourceMapping,
-) {
-    dr, derr := models.NewDetectionRun(
-        organisationId,
-        repoFullName,
-        number,
-        triggerType,
-        triggerAction,
-        commitSha,
-        defaultBranch,
-        targetBranch,
-        labels,
-        changedFiles,
-        impactedProjects,
-        impactedProjectsSourceMapping,
-    )
-    if derr != nil {
-        slog.Error("Failed to build detection run payload", "number", number, "trigger", triggerType, "error", derr)
-        return
-    }
-    if err := models.DB.CreateDetectionRun(dr); err != nil {
-        slog.Error("Failed to persist detection run", "number", number, "trigger", triggerType, "error", err)
-        return
-    }
-    slog.Debug("Persisted detection run", "number", number, "trigger", triggerType, "projects", len(impactedProjects))
+	organisationId uint,
+	repoFullName string,
+	number int,
+	triggerType string, // e.g. "pull_request" | "issue_comment"
+	triggerAction string, // e.g. PR action or "comment"
+	commitSha string,
+	defaultBranch string,
+	targetBranch string,
+	labels []string,
+	changedFiles []string,
+	impactedProjects []digger_config.Project,
+	impactedProjectsSourceMapping map[string]digger_config.ProjectToSourceMapping,
+) error {
+	dr, derr := models.NewDetectionRun(
+		organisationId,
+		repoFullName,
+		number,
+		triggerType,
+		triggerAction,
+		commitSha,
+		defaultBranch,
+		targetBranch,
+		labels,
+		changedFiles,
+		impactedProjects,
+		impactedProjectsSourceMapping,
+	)
+	if derr != nil {
+		slog.Error("Failed to build detection run payload", "number", number, "trigger", triggerType, "error", derr)
+		return derr
+	}
+	if err := models.DB.CreateDetectionRun(dr); err != nil {
+		slog.Error("Failed to persist detection run", "number", number, "trigger", triggerType, "error", err)
+		return err
+	}
+	slog.Debug("Persisted detection run", "number", number, "trigger", triggerType, "projects", len(impactedProjects))
+	return nil
 }
 
 func GenerateTerraformFromCode(payload *github.IssueCommentEvent, commentReporterManager utils.CommentReporterManager, config *digger_config.DiggerConfig, defaultBranch string, ghService *github2.GithubService, repoOwner string, repoName string, commitSha *string, issueNumber int, branch *string) error {
@@ -636,7 +637,7 @@ func retrieveConfigFromCache(orgId uint, repoFullName string) (string, *digger_c
 // Special error for when branch is not found after PR merge
 var ErrBranchNotFoundPostMerge = errors.New("branch not found after PR merge")
 
-// handles post-merge branch not found 
+// handles post-merge branch not found
 func GetDiggerConfigForBranchWithGracefulHandling(gh utils.GithubClientProvider, installationId int64, repoFullName string, repoOwner string, repoName string, cloneUrl string, branch string, isMerged bool, changedFiles []string, taConfig *tac.AtlantisConfig) (string, *github2.GithubService, *digger_config.DiggerConfig, graph.Graph[string, digger_config.Project], error) {
 	slog.Info("Attempting to get Digger config for branch...",
 		"repoFullName", repoFullName,
@@ -681,7 +682,7 @@ func GetDiggerConfigForBranchWithGracefulHandling(gh utils.GithubClientProvider,
 			)
 			return "", ghService, nil, nil, ErrBranchNotFoundPostMerge
 		}
-		
+
 		slog.Error("Problem loading config for branch",
 			"branch", branch,
 			"repoFullName", repoFullName,
@@ -732,7 +733,6 @@ func getDiggerConfigForPR(gh utils.GithubClientProvider, orgId uint, prLabels []
 		)
 		return "", nil, nil, nil, nil, nil, nil, fmt.Errorf("error getting branch name")
 	}
-
 
 	slog.Debug("Retrieved PR details",
 		"prNumber", prNumber,
@@ -811,9 +811,9 @@ func getDiggerConfigForPR(gh utils.GithubClientProvider, orgId uint, prLabels []
 		)
 	}
 
-	// get config 
+	// get config
 	diggerYmlStr, ghService, config, dependencyGraph, err := GetDiggerConfigForBranchWithGracefulHandling(
-		gh, installationId, repoFullName, repoOwner, repoName, cloneUrl, 
+		gh, installationId, repoFullName, repoOwner, repoName, cloneUrl,
 		prBranch, isMerged, changedFiles, taConfig,
 	)
 	if err != nil {
@@ -824,7 +824,7 @@ func getDiggerConfigForPR(gh utils.GithubClientProvider, orgId uint, prLabels []
 			)
 			return "", nil, nil, nil, nil, nil, nil, ErrBranchNotFoundPostMerge
 		}
-		
+
 		slog.Error("Error loading Digger config from repository",
 			"prNumber", prNumber,
 			"repoFullName", repoFullName,

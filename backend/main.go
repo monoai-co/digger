@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
 	"embed"
-	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"github.com/diggerhq/digger/backend/bootstrap"
 	"github.com/diggerhq/digger/backend/ci_backends"
 	"github.com/diggerhq/digger/backend/config"
@@ -19,8 +25,13 @@ func main() {
 		GithubClientProvider:               utils.DiggerGithubRealClientProvider{},
 		GithubWebhookPostIssueCommentHooks: make([]controllers.IssueCommentHook, 0),
 	}
-	r := bootstrap.Bootstrap(templates, ghController)
+	r, githubWebhookProcessor := bootstrap.Bootstrap(templates, ghController)
 	r.GET("/", controllers.Home)
 	port := config.GetPort()
-	r.Run(fmt.Sprintf(":%d", port))
+	processCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := bootstrap.RunServer(processCtx, r, port, githubWebhookProcessor, 50*time.Second); err != nil {
+		slog.Error("Backend server stopped with an error", "error", err)
+		os.Exit(1)
+	}
 }

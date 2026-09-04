@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"html/template"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 
 	"github.com/diggerhq/digger/backend/config"
 	"github.com/diggerhq/digger/backend/logging"
@@ -96,7 +98,7 @@ func cleanupOldProfiles(dir string, keep int) {
 	}
 }
 
-func Bootstrap(templates embed.FS, diggerController controllers.DiggerController) *gin.Engine {
+func Bootstrap(templates embed.FS, diggerController controllers.DiggerController) (*gin.Engine, *controllers.GithubWebhookProcessor) {
 	defer segment.CloseClient()
 	logging.Init()
 	cfg := config.DiggerConfig
@@ -117,6 +119,13 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 
 	//database migrations
 	models.ConnectDatabase()
+	githubWebhookProcessor := controllers.NewGithubWebhookProcessor(
+		models.DB,
+		diggerController.ProcessGithubWebhookDelivery,
+		githubWebhookProcessorConfig(),
+	)
+	diggerController.GithubWebhookProcessor = githubWebhookProcessor
+	githubWebhookProcessor.Start()
 
 	r := gin.Default()
 
@@ -140,6 +149,17 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 			"version":     Version,
 			"commit_sha":  Version,
 		})
+	})
+
+	r.GET("/ready", func(c *gin.Context) {
+		readyCtx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		if err := githubWebhookProcessor.Ready(readyCtx); err != nil {
+			slog.Error("GitHub webhook inbox is not ready", "error", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
 	r.SetFuncMap(template.FuncMap{
@@ -227,6 +247,7 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	admin.PUT("/orgs/:organisation/drift-policy", controllers.UpsertDriftPolicyForOrg)
 
 	admin.POST("/tokens/issue-access-token", controllers.IssueAccessTokenForOrg)
+	admin.POST("/admin/github-webhooks/:deliveryID/requeue", diggerController.RequeueGithubWebhookDelivery)
 
 	r.Use(middleware.CORSMiddleware())
 
@@ -272,5 +293,15 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		policyApiGroup.PUT("/", controllers.PolicyOrgUpsertApi)
 	}
 
-	return r
+	return r, githubWebhookProcessor
+}
+
+func githubWebhookProcessorConfig() controllers.GithubWebhookProcessorConfig {
+	config := controllers.DefaultGithubWebhookProcessorConfig()
+	config.Enabled = os.Getenv("DIGGER_DURABLE_GITHUB_WEBHOOKS_ENABLED") == "1"
+	config.DatabaseIdentity = os.Getenv("DIGGER_CONTROL_PLANE_DATABASE_IDENTITY")
+	if writerEpoch, err := strconv.ParseInt(os.Getenv("DIGGER_CONTROL_PLANE_WRITER_EPOCH"), 10, 64); err == nil {
+		config.WriterEpoch = writerEpoch
+	}
+	return config
 }

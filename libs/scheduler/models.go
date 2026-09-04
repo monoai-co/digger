@@ -16,15 +16,24 @@ const (
 )
 
 type WorkflowInput struct {
-	Spec    string `json:"spec"`
-	RunName string `json:"run_name"`
+	Spec            string `json:"spec"`
+	RunName         string `json:"run_name"`
+	OperationID     string `json:"operation_id,omitempty"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	WriterEpoch     int64  `json:"writer_epoch,omitempty"`
 }
 
 func (w *WorkflowInput) ToMap() map[string]interface{} {
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"spec":     w.Spec,
 		"run_name": w.RunName,
 	}
+	if w.OperationID != "" {
+		result["operation_id"] = w.OperationID
+		result["protocol_version"] = w.ProtocolVersion
+		result["writer_epoch"] = w.WriterEpoch
+	}
+	return result
 }
 
 type DiggerBatchType string
@@ -96,6 +105,7 @@ func (d *DiggerJobStatus) ToEmoji() string {
 
 type SerializedJob struct {
 	DiggerJobId      string          `json:"digger_job_id"`
+	OperationID      string          `json:"operation_id,omitempty"`
 	Status           DiggerJobStatus `json:"status"`
 	ProjectName      string          `json:"project_name"`
 	ProjectAlias     string          `json:"project_alias"`
@@ -110,6 +120,7 @@ type SerializedJob struct {
 
 type SerializedBatch struct {
 	ID           string            `json:"id"`
+	OperationID  string            `json:"operation_id,omitempty"`
 	PrNumber     int               `json:"pr_number"`
 	Status       DiggerBatchStatus `json:"status"`
 	BranchName   string            `json:"branch_name"`
@@ -160,7 +171,6 @@ func (b *SerializedBatch) ToCommitStatusCheck() string {
 	}
 }
 
-
 func (b *SerializedBatch) ToCheckRunStatus() string {
 	switch b.Status {
 	case BatchJobCreated:
@@ -193,7 +203,6 @@ func (b *SerializedBatch) ToCheckRunConclusion() *string {
 		return nil
 	}
 }
-
 
 func (s *SerializedJob) ResourcesSummaryString(isPlan bool) string {
 	if !isPlan {

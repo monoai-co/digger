@@ -135,6 +135,14 @@ func removeRepo(ctx context.Context, repo *github.Repository, installationId int
 }
 
 func handleInstallationDeletedEvent(installation *github.InstallationEvent, appId int64) error {
+	return handleInstallationDeletedEventMode(context.Background(), installation, appId)
+}
+
+func handleInstallationDeletedEventDurable(ctx context.Context, installation *github.InstallationEvent, appId int64) error {
+	return handleInstallationDeletedEventMode(ctx, installation, appId)
+}
+
+func handleInstallationDeletedEventMode(ctx context.Context, installation *github.InstallationEvent, appId int64) error {
 	installationId := installation.Installation.GetID()
 
 	slog.Info("Handling installation deleted event",
@@ -172,7 +180,7 @@ func handleInstallationDeletedEvent(installation *github.InstallationEvent, appI
 
 	// Also process individual repos from the payload (for consistency)
 	for _, repo := range installation.Repositories {
-		if err := removeRepo(context.Background(), repo, installationId, appId, link.OrganisationId); err != nil {
+		if err := removeRepo(ctx, repo, installationId, appId, link.OrganisationId); err != nil {
 			return err
 		}
 	}

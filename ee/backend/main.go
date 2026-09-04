@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/fips140"
 	"embed"
-	"fmt"
 	"github.com/diggerhq/digger/backend/bootstrap"
 	"github.com/diggerhq/digger/backend/config"
 	ce_controllers "github.com/diggerhq/digger/backend/controllers"
@@ -18,6 +18,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 // based on https://www.digitalocean.com/community/tutorials/using-ldflags-to-set-version-information-for-go-applications
@@ -41,7 +44,7 @@ func main() {
 		GithubWebhookPostIssueCommentHooks: []ce_controllers.IssueCommentHook{hooks.DriftReconcilliationHook},
 	}
 
-	r := bootstrap.Bootstrap(templates, diggerController)
+	r, githubWebhookProcessor := bootstrap.Bootstrap(templates, diggerController)
 	cfg := config.DiggerConfig
 
 	eeController := controllers.DiggerEEController{
@@ -109,7 +112,12 @@ func main() {
 	jobArtefactsGroup.GET("/", controllers.DownloadJobArtefact)
 
 	port := config.GetPort()
-	r.Run(fmt.Sprintf(":%d", port))
+	processCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := bootstrap.RunServer(processCtx, r, port, githubWebhookProcessor, 50*time.Second); err != nil {
+		log.Printf("backend server stopped with an error: %v", err)
+		os.Exit(1)
+	}
 }
 
 func init() {

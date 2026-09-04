@@ -38,7 +38,11 @@ const DiggerVCSBitbucket DiggerVCSType = "bitbucket"
 type DiggerBatch struct {
 	gorm.Model
 	ID                       uuid.UUID `gorm:"primary_key"`
-	DiggerBatchID            string    `gorm:"size:20,index:idx_digger_batch_id"` // shorter version of the ID to be able to use in check run
+	OperationID              *string   `gorm:"type:text;uniqueIndex:idx_digger_batches_operation_id,where:operation_id IS NOT NULL"`
+	ProtocolVersion          int       `gorm:"type:integer;not null;default:1"`
+	StatusVersion            int64     `gorm:"not null;default:0"`
+	WriterEpoch              *int64
+	DiggerBatchID            string `gorm:"size:20,index:idx_digger_batch_id"` // shorter version of the ID to be able to use in check run
 	Layer                    uint
 	VCS                      DiggerVCSType
 	PrNumber                 int
@@ -66,7 +70,11 @@ type DiggerBatch struct {
 
 type DiggerJob struct {
 	gorm.Model
-	DiggerJobID                  string                                 `gorm:"size:50,index:idx_digger_job_id"`
+	DiggerJobID                  string  `gorm:"size:50,index:idx_digger_job_id"`
+	OperationID                  *string `gorm:"type:text;uniqueIndex:idx_digger_jobs_operation_id,where:operation_id IS NOT NULL"`
+	ProtocolVersion              int     `gorm:"type:integer;not null;default:1"`
+	StatusVersion                int64   `gorm:"not null;default:0"`
+	WriterEpoch                  *int64
 	Status                       orchestrator_scheduler.DiggerJobStatus `gorm:"index:idx_digger_jobs_status"`
 	RunName                      string
 	ProjectName                  string
@@ -92,7 +100,7 @@ type DiggerJob struct {
 	WorkflowFile    string
 	WorkflowRunUrl  *string
 	StatusUpdatedAt time.Time
-	ReporterType string `gorm:"default:'lazy'"` // temporary, to be replaced by SerializedReporterSpec
+	ReporterType    string `gorm:"default:'lazy'"` // temporary, to be replaced by SerializedReporterSpec
 }
 
 type DiggerJobSummary struct {
@@ -150,6 +158,9 @@ func (j *DiggerJob) MapToJsonStruct() (orchestrator_scheduler.SerializedJob, err
 		ResourcesUpdated: j.DiggerJobSummary.ResourcesUpdated,
 		ResourcesDeleted: j.DiggerJobSummary.ResourcesDeleted,
 	}
+	if j.OperationID != nil {
+		serialized.OperationID = *j.OperationID
+	}
 
 	slog.Debug("Mapped job to JSON struct",
 		"jobId", j.DiggerJobID,
@@ -169,6 +180,9 @@ func (b *DiggerBatch) MapToJsonStruct() (orchestrator_scheduler.SerializedBatch,
 		RepoOwner:    b.RepoOwner,
 		RepoName:     b.RepoName,
 		BatchType:    b.BatchType,
+	}
+	if b.OperationID != nil {
+		res.OperationID = *b.OperationID
 	}
 
 	slog.Debug("Mapping batch to JSON struct",
@@ -259,9 +273,9 @@ func GetCheckRunConclusionForJob(job *DiggerJob) (string, error) {
 		return "failure", nil
 	}
 	slog.Error("Unknown job status in GetCheckRunConclusionForJob - this will cause GitHub API 422 error",
-	"jobId", job.DiggerJobID,
-	"jobStatus", job.Status,
-	"jobStatusInt", int(job.Status),
-	"validStatuses", []string{"created", "triggered", "started", "queued_for_run", "succeeded", "failed"})
+		"jobId", job.DiggerJobID,
+		"jobStatus", job.Status,
+		"jobStatusInt", int(job.Status),
+		"validStatuses", []string{"created", "triggered", "started", "queued_for_run", "succeeded", "failed"})
 	return "", fmt.Errorf("unknown job status: %v", job.Status)
 }

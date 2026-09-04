@@ -17,11 +17,21 @@ import (
 )
 
 func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
+	return handleCheckRunActionEventMode(gh, identifier, payload, ciBackendProvider, appId, false)
+}
+
+func handleCheckRunActionEventDurable(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
+	return handleCheckRunActionEventMode(gh, identifier, payload, ciBackendProvider, appId, true)
+}
+
+func handleCheckRunActionEventMode(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, durable bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			slog.Error("Recovered from panic in handlePullRequestEvent", "error", r, slog.Group("stack"))
-			fmt.Printf("Stack trace:\n%s\n", stack)
+			panicErr := fmt.Errorf("panic in handleCheckRunActionEvent: %v\n%s", r, debug.Stack())
+			slog.Error("Recovered from panic in handleCheckRunActionEvent", "error", panicErr)
+			if durable {
+				err = panicErr
+			}
 		}
 	}()
 
@@ -34,7 +44,7 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 	var checkRunBatch *models.DiggerBatch
 	var checkedRunDiggerJobs []models.DiggerJob
 
-	batchCheckApplyAllPrefix := string(utils.CheckedRunActionBatchApply)+":"
+	batchCheckApplyAllPrefix := string(utils.CheckedRunActionBatchApply) + ":"
 	if strings.HasPrefix(identifier, batchCheckApplyAllPrefix) {
 		diggerBatchId := strings.ReplaceAll(identifier, batchCheckApplyAllPrefix, "")
 		var err error
@@ -49,7 +59,9 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 			return fmt.Errorf("Failed to find batch from identifier %v, err: %v", identifier, err)
 		}
 	}
-
+	if checkRunBatch == nil && durable {
+		return fmt.Errorf("unsupported check run action identifier %q", identifier)
+	}
 
 	installationId := checkRunBatch.GithubInstallationId
 	prNumber := checkRunBatch.PrNumber
@@ -61,6 +73,9 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 			"installationId", installationId,
 			"error", err,
 		)
+		if durable {
+			return fmt.Errorf("get github app installation link: %w", err)
+		}
 		return fmt.Errorf("error getting github app link")
 	}
 	if link == nil {
@@ -71,7 +86,6 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 		return fmt.Errorf("GitHub App installation not found for installation ID %d. Please ensure the GitHub App is properly installed on the repository and the installation process completed successfully", installationId)
 	}
 	orgId := link.OrganisationId
-
 
 	ghService, _, ghServiceErr := utils.GetGithubService(gh, installationId, repoFullName, repoOwner, repoName)
 	if ghServiceErr != nil {
@@ -85,7 +99,9 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 	}
 
 	prBranchName, _, _, _, err := ghService.GetBranchName(prNumber)
-
+	if err != nil && durable {
+		return fmt.Errorf("get pull request branch name: %w", err)
+	}
 
 	diggerYmlStr, ghService, config, projectsGraph, err := GetDiggerConfigForBranchOrSha(gh, installationId, repoFullName, repoOwner, repoName, cloneUrl, prBranchName, commitSha, nil, nil)
 	if err != nil {
@@ -104,11 +120,12 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 	})
 
 	jobs, err := generic.CreateJobsForProjects(selectedProjects, "digger apply", "check_run_action", repoFullName, actor, config.Workflows, &prNumber, &commitSha, "", checkRunBatch.BranchName, false)
-
+	if err != nil && durable {
+		return fmt.Errorf("create jobs for check run action: %w", err)
+	}
 
 	// just use noop since if someone clicks a button he shouldn't see comments on the PR (confusing)
 	reporterType := "noop"
-
 
 	impactedProjectsMap := make(map[string]digger_config.Project)
 	for _, p := range selectedProjects {
@@ -180,7 +197,6 @@ func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string,
 		)
 		return fmt.Errorf("error fetching ci backed %v", err)
 	}
-
 
 	err = TriggerDiggerJobs(ciBackend, repoFullName, repoOwner, repoName, batchId, prNumber, ghService, gh)
 	if err != nil {

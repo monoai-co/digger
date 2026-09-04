@@ -26,11 +26,21 @@ import (
 )
 
 func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullRequestEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
+	return handlePullRequestEventMode(gh, payload, ciBackendProvider, appId, false)
+}
+
+func handlePullRequestEventDurable(gh utils.GithubClientProvider, payload *github.PullRequestEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
+	return handlePullRequestEventMode(gh, payload, ciBackendProvider, appId, true)
+}
+
+func handlePullRequestEventMode(gh utils.GithubClientProvider, payload *github.PullRequestEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, durable bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			slog.Error("Recovered from panic in handlePullRequestEvent", "error", r, slog.Group("stack"))
-			fmt.Printf("Stack trace:\n%s\n", stack)
+			panicErr := fmt.Errorf("panic in handlePullRequestEvent: %v\n%s", r, debug.Stack())
+			slog.Error("Recovered from panic in handlePullRequestEvent", "error", panicErr)
+			if durable {
+				err = panicErr
+			}
 		}
 	}()
 
@@ -157,7 +167,6 @@ func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullR
 			}
 		}
 
-
 		slog.Error("Error getting Digger config for PR",
 			"prNumber", prNumber,
 			"repoFullName", repoFullName,
@@ -184,7 +193,7 @@ func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullR
 	}
 
 	// Persist detection run (append-only) right after impact calculation
-	recordDetectionRun(
+	if err := recordDetectionRun(
 		organisationId,
 		repoFullName,
 		prNumber,
@@ -197,7 +206,9 @@ func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullR
 		changedFiles,
 		impactedProjects,
 		impactedProjectsSourceMapping,
-	)
+	); err != nil && durable {
+		return fmt.Errorf("persist pull request detection run: %w", err)
+	}
 
 	jobsForImpactedProjects, coverAllImpactedProjects, err := github2.ConvertGithubPullRequestEventToJobs(payload, impactedProjects, nil, *config, false)
 	if err != nil {
@@ -222,10 +233,16 @@ func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullR
 			commentReporterManager.UpdateComment(":construction_worker: No projects impacted")
 		}
 		_, _, err = utils.SetPRCheckForJobs(ghService, prNumber, jobsForImpactedProjects, commitSha, repoName, repoOwner)
+		if err != nil && durable {
+			return fmt.Errorf("set empty pull request checks: %w", err)
+		}
 		return nil
 	}
 
 	dbImpactedProjects, err := models.DB.GetImpactedProjects(repoFullName, commitSha)
+	if err != nil && durable {
+		return fmt.Errorf("load recorded impacted projects: %w", err)
+	}
 	// TODO: is this check for db impacted projects necessary?
 	if len(dbImpactedProjects) == 0 {
 		for _, impactedProject := range impactedProjects {
@@ -553,7 +570,7 @@ func handlePullRequestEvent(gh utils.GithubClientProvider, payload *github.PullR
 		commentReporterManager.UpdateComment(fmt.Sprintf(":x: Could not retrieve created batch: %v", err))
 		return fmt.Errorf("error getting digger batch")
 	}
-	
+
 	if config.CommentRenderMode == digger_config.CommentRenderModeGroupByModule {
 		slog.Info("Using GroupByModule render mode for comments", "prNumber", prNumber)
 

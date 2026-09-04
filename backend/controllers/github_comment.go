@@ -28,11 +28,21 @@ import (
 )
 
 func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.IssueCommentEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, postCommentHooks []IssueCommentHook) error {
+	return handleIssueCommentEventMode(gh, payload, ciBackendProvider, appId, postCommentHooks, false)
+}
+
+func handleIssueCommentEventDurable(gh utils.GithubClientProvider, payload *github.IssueCommentEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, postCommentHooks []IssueCommentHook) error {
+	return handleIssueCommentEventMode(gh, payload, ciBackendProvider, appId, postCommentHooks, true)
+}
+
+func handleIssueCommentEventMode(gh utils.GithubClientProvider, payload *github.IssueCommentEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, postCommentHooks []IssueCommentHook, durable bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			slog.Error("Recovered from panic in handleIssueCommentEvent", "error", r, slog.Group("stack"))
-			fmt.Printf("Stack trace:\n%s\n", stack)
+			panicErr := fmt.Errorf("panic in handleIssueCommentEvent: %v\n%s", r, debug.Stack())
+			slog.Error("Recovered from panic in handleIssueCommentEvent", "error", panicErr)
+			if durable {
+				err = panicErr
+			}
 		}
 	}()
 
@@ -293,7 +303,7 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 	if commitSha != nil {
 		csha = *commitSha
 	}
-	recordDetectionRun(
+	if err := recordDetectionRun(
 		orgId,
 		repoFullName,
 		issueNumber,
@@ -306,7 +316,9 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 		changedFiles,
 		allImpactedProjects,
 		impactedProjectsSourceMapping,
-	)
+	); err != nil && durable {
+		return fmt.Errorf("persist issue comment detection run: %w", err)
+	}
 
 	impactedProjectsForComment, err := generic.FilterOutProjectsFromComment(allImpactedProjects, commentBody)
 	if err != nil {
@@ -341,7 +353,6 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 		"issueNumber", issueNumber,
 		"jobCount", len(jobs),
 	)
-
 
 	// impacted projects should have already been populated in the database by here since the PR open would have
 	// populated them, but just in case (disabled pr events or a long old pr before this change was deployed)
@@ -525,6 +536,9 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 		// This one is for aggregate reporting
 		//err = utils.SetPRCommitStatusForJobs(ghService, issueNumber, jobs)
 		_, _, err = utils.SetPRCheckForJobs(ghService, issueNumber, jobs, *commitSha, repoName, repoOwner)
+		if err != nil && durable {
+			return fmt.Errorf("set empty issue comment checks: %w", err)
+		}
 		return nil
 	}
 
@@ -595,7 +609,6 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 		slog.Debug("Created AI summary comment", "commentId", aiSummaryCommentId)
 	}
 
-
 	reporterType := "lazy"
 	if config.Reporting.CommentsEnabled == false {
 		reporterType = "noop"
@@ -646,7 +659,6 @@ func handleIssueCommentEvent(gh utils.GithubClientProvider, payload *github.Issu
 			commentReporterManager.UpdateComment(fmt.Sprintf(":x: PostInitialSourceComments error: %v", err))
 			return fmt.Errorf("error posting initial comments")
 		}
-
 
 		batch.SourceDetails, err = json.Marshal(sourceDetails)
 		if err != nil {
