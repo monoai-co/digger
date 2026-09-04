@@ -231,6 +231,21 @@ func TestOutboxDispatcherDeadLettersProviderPoisonAtMaxAttempts(t *testing.T) {
 	shutdownOutboxDispatcher(t, dispatcher)
 }
 
+func TestOutboxDispatcherDoesNotRedispatchPermanentIdentityMismatch(t *testing.T) {
+	database := newGithubWebhookProcessorTestDatabase(t)
+	effect := enqueueOutboxDispatcherTestEffect(t, database, "operation-identity-mismatch")
+	var attempts atomic.Int32
+	dispatcher := newTestOutboxDispatcher(t, database, func(context.Context, OutboxDispatchRequest) (OutboxDispatchResult, error) {
+		attempts.Add(1)
+		return OutboxDispatchResult{}, ErrOutboxDispatchPermanent
+	}, testOutboxDispatcherConfig())
+	dispatcher.Start()
+	stored := waitForOutboxEffectStatus(t, database, effect.ID, models.OutboxEffectDeadLetter)
+	shutdownOutboxDispatcher(t, dispatcher)
+	require.Equal(t, int64(1), stored.AttemptCount)
+	require.Equal(t, int32(1), attempts.Load())
+}
+
 func TestEnabledOutboxDispatcherRejectsMisconfigurationBeforeClaim(t *testing.T) {
 	database := newGithubWebhookProcessorTestDatabase(t)
 	effect := enqueueOutboxDispatcherTestEffect(t, database, "operation-no-handler")

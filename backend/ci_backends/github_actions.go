@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/diggerhq/digger/backend/utils"
 	orchestrator_scheduler "github.com/diggerhq/digger/libs/scheduler"
@@ -24,6 +25,30 @@ type WorkflowDispatchRunDetails struct {
 	RunID   int64  `json:"workflow_run_id"`
 	RunURL  string `json:"run_url"`
 	HTMLURL string `json:"html_url"`
+}
+
+type DurableWorkflowTarget struct {
+	RepositoryID int64
+	WorkflowID   int64
+	ControlRef   string
+}
+
+func (g GithubActionCi) ResolveDurableWorkflowTarget(ctx context.Context, workflowSpec spec.Spec) (*DurableWorkflowTarget, error) {
+	repository, _, err := g.Client.Repositories.Get(ctx, workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow repository: %w", err)
+	}
+	if repository.GetID() <= 0 || repository.GetDefaultBranch() == "" || repository.GetFullName() != workflowSpec.VCS.RepoOwner+"/"+workflowSpec.VCS.RepoName {
+		return nil, fmt.Errorf("workflow repository identity is invalid")
+	}
+	workflow, _, err := g.Client.Actions.GetWorkflowByFileName(ctx, workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName, workflowSpec.VCS.WorkflowFile)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow identity: %w", err)
+	}
+	if workflow.GetID() <= 0 || workflow.GetPath() != ".github/workflows/"+strings.TrimPrefix(workflowSpec.VCS.WorkflowFile, ".github/workflows/") || workflow.GetState() != "active" {
+		return nil, fmt.Errorf("workflow identity is invalid or disabled")
+	}
+	return &DurableWorkflowTarget{RepositoryID: repository.GetID(), WorkflowID: workflow.GetID(), ControlRef: repository.GetDefaultBranch()}, nil
 }
 
 func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken string) error {
@@ -66,8 +91,8 @@ func (g GithubActionCi) TriggerWorkflowContextAtRef(ctx context.Context, spec sp
 	return err
 }
 
-func (g GithubActionCi) TriggerWorkflowContextAtRefWithRunDetails(ctx context.Context, spec spec.Spec, runName string, vcsToken string, controlRef string) (*WorkflowDispatchRunDetails, error) {
-	if controlRef == "" {
+func (g GithubActionCi) TriggerWorkflowContextAtRefWithRunDetails(ctx context.Context, spec spec.Spec, runName string, vcsToken string, controlRef string, workflowID int64) (*WorkflowDispatchRunDetails, error) {
+	if controlRef == "" || workflowID <= 0 {
 		return nil, fmt.Errorf("dispatch repository control ref: ref is empty")
 	}
 	inputs, err := workflowDispatchInputs(spec, runName)
@@ -84,7 +109,7 @@ func (g GithubActionCi) TriggerWorkflowContextAtRefWithRunDetails(ctx context.Co
 		Inputs:           inputs,
 		ReturnRunDetails: true,
 	}
-	requestPath := fmt.Sprintf("repos/%v/%v/actions/workflows/%v/dispatches", spec.VCS.RepoOwner, spec.VCS.RepoName, spec.VCS.WorkflowFile)
+	requestPath := fmt.Sprintf("repos/%v/%v/actions/workflows/%d/dispatches", spec.VCS.RepoOwner, spec.VCS.RepoName, workflowID)
 	request, err := g.Client.NewRequest(http.MethodPost, requestPath, body)
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub workflow dispatch request: %w", err)
@@ -95,7 +120,7 @@ func (g GithubActionCi) TriggerWorkflowContextAtRefWithRunDetails(ctx context.Co
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrWorkflowDispatchAcceptanceAmbiguous, err)
 	}
-	if response == nil || response.StatusCode != http.StatusOK || details.RunID <= 0 || details.RunURL == "" || details.HTMLURL == "" {
+	if response == nil || response.StatusCode != http.StatusOK || details.RunID <= 0 {
 		statusCode := 0
 		if response != nil {
 			statusCode = response.StatusCode

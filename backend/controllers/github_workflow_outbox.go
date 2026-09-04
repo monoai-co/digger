@@ -79,11 +79,12 @@ func NewGithubWorkflowOutboxDispatch(
 			return OutboxDispatchResult{}, err
 		}
 		durableRunName := durableWorkflowRunName(*runName, *preparation.Job.OperationID)
-		controlRef, err := backend.ResolveControlRef(ctx, workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName)
+		target, err := backend.ResolveDurableWorkflowTarget(ctx, *workflowSpec)
 		if err != nil {
 			return OutboxDispatchResult{}, err
 		}
-		details, err := backend.TriggerWorkflowContextAtRefWithRunDetails(ctx, *workflowSpec, durableRunName, "", controlRef)
+		controlRef := target.ControlRef
+		details, err := backend.TriggerWorkflowContextAtRefWithRunDetails(ctx, *workflowSpec, durableRunName, "", controlRef, target.WorkflowID)
 		if err != nil {
 			return OutboxDispatchResult{}, err
 		}
@@ -91,12 +92,10 @@ func NewGithubWorkflowOutboxDispatch(
 		if err != nil {
 			return OutboxDispatchResult{}, fmt.Errorf("%w: load dispatched workflow run: %v", ci_backends.ErrWorkflowDispatchAcceptanceAmbiguous, err)
 		}
-		if run.GetHTMLURL() == "" {
-			run.HTMLURL = &details.HTMLURL
+		if !sameDurableWorkflowRun(run, details.RunID, target) {
+			return OutboxDispatchResult{}, fmt.Errorf("%w: returned workflow run does not match dispatch", ErrOutboxDispatchPermanent)
 		}
-		if !sameDurableWorkflowRun(run, durableRunName, controlRef) {
-			return OutboxDispatchResult{}, fmt.Errorf("%w: returned workflow run does not match dispatch", ci_backends.ErrWorkflowDispatchAcceptanceAmbiguous)
-		}
+		run.HTMLURL = github.String(fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName, details.RunID))
 		return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, false, controlRef, run)
 	}, nil
 }
@@ -105,9 +104,10 @@ func durableWorkflowRunName(runName string, operationID string) string {
 	return fmt.Sprintf("%s [digger-operation:%s]", strings.TrimSpace(runName), operationID)
 }
 
-func sameDurableWorkflowRun(run *github.WorkflowRun, runName string, controlRef string) bool {
-	return run != nil && run.GetID() > 0 && run.GetRunAttempt() == 1 && run.GetDisplayTitle() == runName &&
-		run.GetEvent() == "workflow_dispatch" && run.GetHeadBranch() == controlRef && run.GetHeadSHA() != ""
+func sameDurableWorkflowRun(run *github.WorkflowRun, runID int64, target *ci_backends.DurableWorkflowTarget) bool {
+	return run != nil && target != nil && runID > 0 && run.GetID() == runID && run.GetRunAttempt() == 1 &&
+		run.GetRepository().GetID() == target.RepositoryID && target.RepositoryID > 0 && run.GetWorkflowID() == target.WorkflowID && target.WorkflowID > 0 &&
+		run.GetEvent() == "workflow_dispatch" && run.GetHeadBranch() == target.ControlRef && workflowDigest.MatchString(run.GetHeadSHA())
 }
 
 func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, controlRef string, run *github.WorkflowRun) (OutboxDispatchResult, error) {
@@ -123,6 +123,8 @@ func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, contr
 		RunAttempt   int    `json:"run_attempt,omitempty"`
 		RunURL       string `json:"run_url,omitempty"`
 		HeadSHA      string `json:"head_sha,omitempty"`
+		RepositoryID int64  `json:"repository_id,omitempty"`
+		WorkflowID   int64  `json:"workflow_id,omitempty"`
 	}{
 		Accepted:     !terminalNoop,
 		OperationID:  operationID,
@@ -134,6 +136,8 @@ func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, contr
 		receipt.RunAttempt = run.GetRunAttempt()
 		receipt.RunURL = run.GetHTMLURL()
 		receipt.HeadSHA = run.GetHeadSHA()
+		receipt.RepositoryID = run.GetRepository().GetID()
+		receipt.WorkflowID = run.GetWorkflowID()
 	}
 	serializedReceipt, err := json.Marshal(receipt)
 	if err != nil {

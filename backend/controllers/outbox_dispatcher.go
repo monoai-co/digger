@@ -18,6 +18,7 @@ import (
 )
 
 var ErrOutboxDispatcherMisconfigured = errors.New("outbox dispatcher is misconfigured")
+var ErrOutboxDispatchPermanent = errors.New("outbox provider response requires reconciliation")
 
 type outboxEffectStore interface {
 	ClaimNextOutboxEffect(context.Context, time.Time, string, time.Duration, string, int64) (*models.OutboxEffect, error)
@@ -354,7 +355,7 @@ func (d *OutboxDispatcher) finishClaim(effect *models.OutboxEffect, leaseID stri
 	}
 
 	lastError := truncateOutboxError(outcome.err.Error())
-	if effect.AttemptCount >= d.config.MaxAttempts {
+	if errors.Is(outcome.err, ErrOutboxDispatchPermanent) || effect.AttemptCount >= d.config.MaxAttempts {
 		if err := d.store.DeadLetterOutboxEffect(context.Background(), effect.ID, leaseID, lastError, now, d.config.DatabaseIdentity, d.config.WriterEpoch); err != nil {
 			slog.Error("Failed to dead-letter outbox effect", "effectID", effect.ID, "error", err)
 			return

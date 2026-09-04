@@ -630,7 +630,7 @@ func (db *Database) ClaimDurableJobExecution(
 		dispatchReceipt, err := decodeDurableWorkflowDispatchReceipt(effect.ProviderReceipt)
 		if err != nil || dispatchReceipt.OperationID != request.OperationID || !dispatchReceipt.Accepted || dispatchReceipt.TerminalNoop ||
 			dispatchReceipt.RunID != request.RunID || dispatchReceipt.RunAttempt != 1 || int64(dispatchReceipt.RunAttempt) != request.RunAttempt || dispatchReceipt.ControlRef == "" ||
-			dispatchReceipt.HeadSHA != request.WorkflowSHA {
+			dispatchReceipt.HeadSHA != request.WorkflowSHA || dispatchReceipt.RepositoryID != request.RepositoryID {
 			return ErrDurableJobDispatchClaim
 		}
 		state, err := loadDurableWorkflowDispatchStateTx(tx, &effect)
@@ -726,6 +726,8 @@ func (db *Database) ClaimDurableJobExecution(
 }
 
 type durableWorkflowDispatchProviderReceipt struct {
+	RepositoryID int64  `json:"repository_id"`
+	WorkflowID   int64  `json:"workflow_id"`
 	Accepted     bool   `json:"accepted"`
 	OperationID  string `json:"operation_id"`
 	TerminalNoop bool   `json:"terminal_noop"`
@@ -749,7 +751,7 @@ func decodeDurableWorkflowDispatchReceipt(payload []byte) (*durableWorkflowDispa
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("decode durable workflow dispatch receipt: trailing JSON")
 	}
-	if !operation.ID(receipt.OperationID).Valid() || receipt.RunID <= 0 || receipt.RunAttempt != 1 ||
+	if !operation.ID(receipt.OperationID).Valid() || receipt.RunID <= 0 || receipt.RunAttempt != 1 || receipt.RepositoryID <= 0 || receipt.WorkflowID <= 0 ||
 		strings.TrimSpace(receipt.ControlRef) == "" || strings.TrimSpace(receipt.ControlRef) != receipt.ControlRef ||
 		!validLowerHexDigest(receipt.HeadSHA, 40) || strings.TrimSpace(receipt.RunURL) == "" {
 		return nil, ErrDurableJobDispatchClaim

@@ -258,13 +258,15 @@ func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.D
 func durableGraphDispatchReceipt(t *testing.T, operationID string, runID int64, headSHA string) []byte {
 	t.Helper()
 	receipt, err := json.Marshal(map[string]any{
-		"accepted":     true,
-		"operation_id": operationID,
-		"control_ref":  "main",
-		"run_id":       runID,
-		"run_attempt":  1,
-		"run_url":      fmt.Sprintf("https://github.com/monoai-co/sre/actions/runs/%d", runID),
-		"head_sha":     headSHA,
+		"repository_id": 12345,
+		"workflow_id":   42,
+		"accepted":      true,
+		"operation_id":  operationID,
+		"control_ref":   "main",
+		"run_id":        runID,
+		"run_attempt":   1,
+		"run_url":       fmt.Sprintf("https://github.com/monoai-co/sre/actions/runs/%d", runID),
+		"head_sha":      headSHA,
 	})
 	require.NoError(t, err)
 	return receipt
@@ -439,6 +441,20 @@ func TestClaimDurableJobExecutionRequiresCommittedDispatchAndExactRoute(t *testi
 			require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 		})
 	}
+}
+
+func TestClaimDurableJobExecutionRejectsDifferentAttestedRepository(t *testing.T) {
+	database, organisation, delivery := newDurableGraphTestDatabase(t)
+	job, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	request.RepositoryID++
+	_, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets([]byte(strings.Repeat("grant-secret-", 3))), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+	var count int64
+	require.NoError(t, database.GormDB.Model(&models.ExecutionClaimAttempt{}).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, database.GormDB.First(job, "id = ?", job.ID).Error)
+	require.Equal(t, scheduler.DiggerJobTriggered, job.Status)
+	require.Equal(t, int64(1), job.StatusVersion)
 }
 
 func TestClaimDurableJobExecutionRejectsUncommittedRunAttemptBeforeMutation(t *testing.T) {

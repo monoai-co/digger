@@ -67,12 +67,16 @@ func githubWorkflowDispatchTestProvider(t *testing.T, dispatches *int, capturedS
 	return backendutils.DiggerGithubClientMockProvider{MockedHTTPClient: &http.Client{Transport: githubWorkflowDispatchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"default_branch":"main"}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":12345,"full_name":"monoai-co/sre","default_branch":"main"}`)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":42,"path":".github/workflows/digger_workflow.yml","state":"active"}`)), Header: make(http.Header)}, nil
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/runs/901":
 			body, err := json.Marshal(github.WorkflowRun{
 				ID:           github.Int64(901),
+				WorkflowID:   github.Int64(42),
+				Repository:   &github.Repository{ID: github.Int64(12345)},
 				RunAttempt:   github.Int(1),
-				DisplayTitle: capturedRunName,
+				DisplayTitle: github.String("A custom workflow title"),
 				Event:        github.String("workflow_dispatch"),
 				HeadBranch:   github.String("main"),
 				HeadSHA:      github.String("0123456789012345678901234567890123456789"),
@@ -80,7 +84,7 @@ func githubWorkflowDispatchTestProvider(t *testing.T, dispatches *int, capturedS
 			})
 			require.NoError(t, err)
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
-		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml/dispatches":
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/42/dispatches":
 			(*dispatches)++
 			var body struct {
 				Inputs map[string]any `json:"inputs"`
@@ -214,8 +218,10 @@ func TestGithubWorkflowOutboxDispatchRetriesAmbiguousAcceptAndCommitsReturnedRun
 	provider := backendutils.DiggerGithubClientMockProvider{MockedHTTPClient: &http.Client{Transport: githubWorkflowDispatchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"default_branch":"main"}`)), Header: make(http.Header)}, nil
-		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml/dispatches":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":12345,"full_name":"monoai-co/sre","default_branch":"main"}`)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":42,"path":".github/workflows/digger_workflow.yml","state":"active"}`)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/42/dispatches":
 			dispatches++
 			var body struct {
 				Inputs map[string]any `json:"inputs"`
@@ -231,6 +237,8 @@ func TestGithubWorkflowOutboxDispatchRetriesAmbiguousAcceptAndCommitsReturnedRun
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(details)), Header: make(http.Header)}, nil
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/runs/902":
 			run := github.WorkflowRun{ID: github.Int64(902), RunAttempt: github.Int(1), DisplayTitle: &runName, Event: github.String("workflow_dispatch"), HeadBranch: github.String("main"), HeadSHA: github.String(strings.Repeat("a", 40)), HTMLURL: github.String("https://github.com/monoai-co/sre/actions/runs/902")}
+			run.WorkflowID = github.Int64(42)
+			run.Repository = &github.Repository{ID: github.Int64(12345)}
 			body, err := json.Marshal(run)
 			require.NoError(t, err)
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
@@ -332,5 +340,32 @@ func TestGithubWorkflowOutboxDispatchCancelsContextDuringClientAcquisition(t *te
 		require.ErrorIs(t, dispatchErr, context.Canceled)
 	case <-time.After(time.Second):
 		t.Fatal("context-aware GitHub client acquisition did not stop after cancellation")
+	}
+}
+
+func TestDurableWorkflowRunUsesProviderIdentityInsteadOfDisplayTitle(t *testing.T) {
+	target := &ci_backends.DurableWorkflowTarget{RepositoryID: 12345, WorkflowID: 42, ControlRef: "main"}
+	validRun := func() *github.WorkflowRun {
+		return &github.WorkflowRun{
+			ID: github.Int64(901), Repository: &github.Repository{ID: github.Int64(12345)}, WorkflowID: github.Int64(42),
+			RunAttempt: github.Int(1), Event: github.String("workflow_dispatch"), HeadBranch: github.String("main"), HeadSHA: github.String(strings.Repeat("a", 40)),
+		}
+	}
+	require.True(t, sameDurableWorkflowRun(validRun(), 901, target))
+	for name, change := range map[string]func(*github.WorkflowRun){
+		"run id":       func(r *github.WorkflowRun) { r.ID = github.Int64(902) },
+		"repo id":      func(r *github.WorkflowRun) { r.Repository.ID = github.Int64(12346) },
+		"missing repo": func(r *github.WorkflowRun) { r.Repository = nil },
+		"workflow id":  func(r *github.WorkflowRun) { r.WorkflowID = github.Int64(43) },
+		"run attempt":  func(r *github.WorkflowRun) { r.RunAttempt = github.Int(2) },
+		"event":        func(r *github.WorkflowRun) { r.Event = github.String("push") },
+		"ref":          func(r *github.WorkflowRun) { r.HeadBranch = github.String("feature") },
+		"sha":          func(r *github.WorkflowRun) { r.HeadSHA = github.String("main") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := validRun()
+			change(run)
+			require.False(t, sameDurableWorkflowRun(run, 901, target))
+		})
 	}
 }
