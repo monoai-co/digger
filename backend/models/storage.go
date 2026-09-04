@@ -1690,16 +1690,14 @@ func (db *Database) GetToken(tenantId any) (*Token, error) {
 	result := db.GormDB.Take(token, "value = ?", tenantId)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			slog.Debug("token not found", "tenantId", tenantId)
+			slog.Debug("API token not found")
 			return nil, nil
 		} else {
-			slog.Error("error fetching token",
-				"tenantId", tenantId,
-				"error", result.Error)
+			slog.Error("error fetching API token", "error", result.Error)
 			return nil, result.Error
 		}
 	}
-	slog.Debug("token found", "tenantId", tenantId)
+	slog.Debug("API token found", "tokenId", token.ID)
 	return token, nil
 }
 
@@ -1734,12 +1732,10 @@ func (db *Database) GetJobToken(tenantId any) (*JobToken, error) {
 	result := db.GormDB.Take(token, "value = ?", tenantId)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			slog.Debug("job token not found", "tenantId", tenantId)
+			slog.Debug("job token not found")
 			return nil, nil
 		} else {
-			slog.Error("error fetching job token",
-				"tenantId", tenantId,
-				"error", result.Error)
+			slog.Error("error fetching job token", "error", result.Error)
 			return nil, result.Error
 		}
 	}

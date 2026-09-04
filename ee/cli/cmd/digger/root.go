@@ -119,7 +119,7 @@ func NewBackendApi(hostName string, authToken string) backendapi.Api {
 		log.Println("WARNING: running in 'backendless' mode. Features that require backend will not be available.")
 		backendApi = backendapi.NoopApi{}
 	} else {
-		backendApi = backendapi.DiggerApi{
+		backendApi = &backendapi.DiggerApi{
 			DiggerHost: hostName,
 			AuthToken:  authToken,
 			HttpClient: http.DefaultClient,

@@ -94,6 +94,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		&models.GithubDiggerJobLink{},
 		&models.DiggerJobParentLink{},
 		&models.OutboxEffect{},
+		&models.ExecutionClaimAttempt{},
 	))
 	require.NoError(t, gormDB.Create(&models.ControlPlaneFence{
 		ID:               models.ControlPlaneFenceSingletonID,
@@ -171,6 +172,216 @@ func durableGraphTestRequest(t *testing.T, organisation *models.Organisation, de
 		DiggerConfig:             "projects: []",
 		CoverAllImpactedProjects: true,
 	}
+}
+
+func prepareDurableExecutionClaimTest(t *testing.T, database *models.Database, organisation *models.Organisation, delivery *models.GithubWebhookDelivery) (*models.DiggerJob, models.DurableExecutionClaimRequest, string) {
+	t.Helper()
+	_, jobs, err := ConvertJobsToDiggerJobsDurable(context.Background(), durableGraphTestRequest(t, organisation, delivery))
+	require.NoError(t, err)
+	job := jobs["root-one"]
+	require.NotNil(t, job.OperationID)
+	var effect models.OutboxEffect
+	require.NoError(t, database.GormDB.First(&effect, "operation_id = ? AND effect_kind = ?", *job.OperationID, models.GithubWorkflowDispatchEffectKind).Error)
+	now := time.Now().UTC()
+	const leaseID = "execution-claim-dispatch-lease"
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("id = ?", effect.ID).Updates(map[string]any{
+		"status":           models.OutboxEffectProcessing,
+		"lease_id":         leaseID,
+		"lease_expires_at": now.Add(time.Minute),
+		"writer_epoch":     durableGraphTestWriterEpoch,
+		"updated_at":       now,
+	}).Error)
+	preparation, err := database.PrepareDurableJobDispatch(context.Background(), effect.ID, leaseID, time.Hour, time.Minute, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+	require.NotNil(t, preparation)
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("id = ?", effect.ID).Updates(map[string]any{
+		"status":           models.OutboxEffectSucceeded,
+		"lease_id":         "",
+		"lease_expires_at": nil,
+		"updated_at":       time.Now().UTC(),
+	}).Error)
+	var token models.JobToken
+	require.NoError(t, database.GormDB.First(&token, "digger_job_database_id = ?", job.ID).Error)
+	return job, models.DurableExecutionClaimRequest{
+		OperationID:         *job.OperationID,
+		DiggerJobID:         job.DiggerJobID,
+		RepositoryFullName:  "monoai-co/sre",
+		ProjectName:         job.ProjectName,
+		RunID:               1001,
+		RunAttempt:          1,
+		WorkflowRef:         "monoai-co/sre/.github/workflows/digger_workflow.yml@refs/heads/main",
+		WorkflowSHA:         strings.Repeat("a", 40),
+		ActionRef:           "diggerhq/digger@v1",
+		CLISHA256:           strings.Repeat("b", 64),
+		ProtocolVersion:     operation.ProtocolVersion,
+		DispatchWriterEpoch: durableGraphTestWriterEpoch,
+	}, token.Value
+}
+
+func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
+	database, organisation, delivery := newDurableGraphTestDatabase(t)
+	job, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	secret := []byte(strings.Repeat("grant-secret-", 3))
+
+	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+	require.True(t, receipt.Granted)
+	require.False(t, receipt.AlreadyGranted)
+	require.NotEmpty(t, receipt.ExecutionGrant)
+
+	replay, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+	require.True(t, replay.Granted)
+	require.True(t, replay.AlreadyGranted)
+	require.Equal(t, receipt.ExecutionGrant, replay.ExecutionGrant)
+
+	changed := request
+	changed.WorkflowRef += "-tampered"
+	_, err = database.ClaimDurableJobExecution(context.Background(), changed, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchConflict)
+
+	competitor := request
+	competitor.RunID++
+	rejected, err := database.ClaimDurableJobExecution(context.Background(), competitor, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+	require.False(t, rejected.Granted)
+
+	for _, invalidToken := range []string{"cli:wrong", ""} {
+		_, err = database.ClaimDurableJobExecution(context.Background(), request, invalidToken, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+		require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+	}
+	var storedJob models.DiggerJob
+	require.NoError(t, database.GormDB.First(&storedJob, "id = ?", job.ID).Error)
+	require.Equal(t, scheduler.DiggerJobStarted, storedJob.Status)
+	require.Equal(t, int64(2), storedJob.StatusVersion)
+	var attempts []models.ExecutionClaimAttempt
+	require.NoError(t, database.GormDB.Order("run_id").Find(&attempts).Error)
+	require.Len(t, attempts, 2)
+	require.Equal(t, models.ExecutionClaimGranted, attempts[0].State)
+	require.Equal(t, models.ExecutionClaimRejected, attempts[1].State)
+}
+
+func TestPostgresClaimDurableJobExecutionGrantsOnlyOneRun(t *testing.T) {
+	database, organisation, delivery := newPostgresDurableGraphTestDatabase(t)
+	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	secret := []byte(strings.Repeat("grant-secret-", 3))
+	start := make(chan struct{})
+	const contenders = 32
+	receipts := make(chan *models.DurableExecutionClaimReceipt, contenders)
+	errorsByWorker := make(chan error, contenders)
+	var workers sync.WaitGroup
+	for offset := int64(0); offset < contenders; offset++ {
+		claim := request
+		claim.RunID += offset
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			receipt, err := database.ClaimDurableJobExecution(context.Background(), claim, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+			if err != nil {
+				errorsByWorker <- err
+				return
+			}
+			receipts <- receipt
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(receipts)
+	close(errorsByWorker)
+	for err := range errorsByWorker {
+		require.NoError(t, err)
+	}
+	granted := 0
+	rejected := 0
+	for receipt := range receipts {
+		if receipt.Granted {
+			granted++
+		} else {
+			rejected++
+		}
+	}
+	require.Equal(t, 1, granted)
+	require.Equal(t, contenders-1, rejected)
+}
+
+func TestClaimDurableJobExecutionRequiresCommittedDispatchAndExactRoute(t *testing.T) {
+	database, organisation, delivery := newDurableGraphTestDatabase(t)
+	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	secret := []byte(strings.Repeat("grant-secret-", 3))
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("operation_id = ?", request.OperationID).Update("status", models.OutboxEffectProcessing).Error)
+	_, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchNotReady)
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("operation_id = ?", request.OperationID).Update("status", models.OutboxEffectSucceeded).Error)
+
+	for name, mutate := range map[string]func(*models.DurableExecutionClaimRequest){
+		"job":        func(claim *models.DurableExecutionClaimRequest) { claim.DiggerJobID += "-other" },
+		"repository": func(claim *models.DurableExecutionClaimRequest) { claim.RepositoryFullName = "monoai-co/other" },
+		"project":    func(claim *models.DurableExecutionClaimRequest) { claim.ProjectName = "other" },
+		"epoch":      func(claim *models.DurableExecutionClaimRequest) { claim.DispatchWriterEpoch++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := request
+			mutate(&changed)
+			_, err := database.ClaimDurableJobExecution(context.Background(), changed, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+			require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+		})
+	}
+}
+
+func TestClaimDurableJobExecutionReplaySurvivesWriterHandoff(t *testing.T) {
+	database, organisation, delivery := newDurableGraphTestDatabase(t)
+	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	secret := []byte(strings.Repeat("grant-secret-", 3))
+	first, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+
+	const targetEpoch = durableGraphTestWriterEpoch + 1
+	require.NoError(t, database.GormDB.Model(&models.ControlPlaneFence{}).Where("id = ?", models.ControlPlaneFenceSingletonID).Update("writer_epoch", targetEpoch).Error)
+	replayed, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, targetEpoch)
+	require.NoError(t, err)
+	require.True(t, replayed.Granted)
+	require.True(t, replayed.AlreadyGranted)
+	require.Equal(t, first.ExecutionGrant, replayed.ExecutionGrant)
+}
+
+func TestPostgresRecoveredDispatchCanClaimThroughNewWriterEpoch(t *testing.T) {
+	database, organisation, delivery := newPostgresDurableGraphTestDatabase(t)
+	_, _, err := ConvertJobsToDiggerJobsDurable(context.Background(), durableGraphTestRequest(t, organisation, delivery))
+	require.NoError(t, err)
+	const targetEpoch = durableGraphTestWriterEpoch + 1
+	require.NoError(t, database.GormDB.Model(&models.ControlPlaneFence{}).Where("id = ?", models.ControlPlaneFenceSingletonID).Update("writer_epoch", targetEpoch).Error)
+	claimedEffect, err := database.ClaimNextOutboxEffect(context.Background(), time.Now().UTC(), "recovered-dispatch", time.Minute, durableGraphTestDatabaseIdentity, targetEpoch)
+	require.NoError(t, err)
+	require.NotNil(t, claimedEffect)
+	require.Equal(t, targetEpoch, claimedEffect.WriterEpoch)
+	var job models.DiggerJob
+	require.NoError(t, database.GormDB.First(&job, "operation_id = ?", claimedEffect.ControlOperationID).Error)
+	preparation, err := database.PrepareDurableJobDispatch(context.Background(), claimedEffect.ID, claimedEffect.LeaseID, time.Hour, time.Minute, durableGraphTestDatabaseIdentity, targetEpoch)
+	require.NoError(t, err)
+	require.NotNil(t, preparation.Job.WriterEpoch)
+	require.Equal(t, durableGraphTestWriterEpoch, *preparation.Job.WriterEpoch)
+	require.NoError(t, database.CompleteOutboxEffect(context.Background(), claimedEffect.ID, claimedEffect.LeaseID, []byte(`{"accepted":true}`), time.Now().UTC(), durableGraphTestDatabaseIdentity, targetEpoch))
+
+	var token models.JobToken
+	require.NoError(t, database.GormDB.First(&token, "digger_job_database_id = ?", job.ID).Error)
+	request := models.DurableExecutionClaimRequest{
+		OperationID:         *job.OperationID,
+		DiggerJobID:         job.DiggerJobID,
+		RepositoryFullName:  "monoai-co/sre",
+		ProjectName:         job.ProjectName,
+		RunID:               2001,
+		RunAttempt:          1,
+		WorkflowRef:         "monoai-co/sre/.github/workflows/digger_workflow.yml@refs/heads/main",
+		WorkflowSHA:         strings.Repeat("c", 40),
+		ActionRef:           "diggerhq/digger@v1",
+		CLISHA256:           strings.Repeat("d", 64),
+		ProtocolVersion:     operation.ProtocolVersion,
+		DispatchWriterEpoch: durableGraphTestWriterEpoch,
+	}
+	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token.Value, []byte(strings.Repeat("grant-secret-", 3)), durableGraphTestDatabaseIdentity, targetEpoch)
+	require.NoError(t, err)
+	require.True(t, receipt.Granted)
 }
 
 func TestConvertJobsToDiggerJobsDurableIsAtomicAndIdempotent(t *testing.T) {

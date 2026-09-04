@@ -28,6 +28,9 @@ func RunSpecManualCommand(
 	PlanStorageProvider spec.PlanStorageProvider,
 	commentUpdaterProvider comment_summary.CommentUpdaterProvider,
 ) error {
+	if spec.OperationID != "" {
+		return fmt.Errorf("durable jobs cannot use manual execution mode")
+	}
 
 	job, err := jobProvider.GetJob(spec.Job)
 	if err != nil {

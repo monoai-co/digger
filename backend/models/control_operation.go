@@ -85,6 +85,7 @@ type ExecutionClaimAttempt struct {
 	CLISHA256           string              `gorm:"column:cli_sha256;type:text;not null"`
 	ProtocolVersion     int                 `gorm:"type:integer;not null"`
 	ExpectedWriterEpoch int64               `gorm:"not null"`
+	DispatchWriterEpoch int64               `gorm:"not null;check:execution_claim_attempts_epochs_check,dispatch_writer_epoch > 0 AND expected_writer_epoch > 0"`
 	State               ExecutionClaimState `gorm:"type:text;not null;default:pending;check:execution_claim_attempts_state_check,state IN ('pending','granted','rejected')"`
 	GrantTokenSHA256    string              `gorm:"type:text"`
 	GrantedAt           *time.Time

@@ -657,6 +657,10 @@ func (d DiggerController) SetJobStatusForProject(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching job"})
 		return
 	}
+	if job.OperationID != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "durable jobs require the versioned status callback endpoint"})
+		return
+	}
 
 	batchId := *job.BatchID
 
@@ -1121,7 +1125,6 @@ func (d DiggerController) SetJobStatusForProject(c *gin.Context) {
 			slog.Debug("Successfully updated GitHub Check Run for job", "jobId", jobId)
 		}
 	}()
-
 
 	if batch.ReportTerraformOutputs {
 		slog.Info("Generating Terraform outputs summary", "batchId", batch.ID)

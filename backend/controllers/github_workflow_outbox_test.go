@@ -173,7 +173,7 @@ func TestGithubWorkflowOutboxDispatchPreparesTokenBeforeProvider(t *testing.T) {
 	require.Equal(t, 1, dispatches)
 	require.Equal(t, request.OperationID, capturedSpec.OperationID)
 	require.Equal(t, operation.ProtocolVersion, capturedSpec.ProtocolVersion)
-	require.Equal(t, int64(8), capturedSpec.WriterEpoch)
+	require.Equal(t, int64(7), capturedSpec.WriterEpoch)
 	require.Equal(t, "monoai-co/sre", capturedSpec.VCS.RepoFullname)
 }
 

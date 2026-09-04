@@ -40,6 +40,9 @@ type DiggerController struct {
 	GithubClientProvider               utils.GithubClientProvider
 	GithubWebhookPostIssueCommentHooks []IssueCommentHook
 	GithubWebhookProcessor             githubWebhookAdmitter
+	ControlPlaneDatabaseIdentity       string
+	ControlPlaneWriterEpoch            int64
+	ExecutionGrantSecret               []byte
 }
 
 func (d DiggerController) GithubAppWebHook(c *gin.Context) {

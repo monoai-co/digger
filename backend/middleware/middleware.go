@@ -68,6 +68,12 @@ func GetApiMiddleware() gin.HandlerFunc {
 
 func CheckJobToken(c *gin.Context, token string) (*models.JobToken, error) {
 	jobToken, err := models.DB.GetJobToken(token)
+	if err != nil {
+		slog.Error("Error while fetching token from database", "error", err)
+		c.String(http.StatusInternalServerError, "Error occurred while fetching database")
+		c.Abort()
+		return nil, fmt.Errorf("could not fetch cli token")
+	}
 	if jobToken == nil {
 		slog.Warn("Invalid bearer token")
 		c.String(http.StatusForbidden, "Invalid bearer token")
@@ -75,20 +81,14 @@ func CheckJobToken(c *gin.Context, token string) (*models.JobToken, error) {
 		return nil, fmt.Errorf("invalid bearer token")
 	}
 
-	if time.Now().After(jobToken.Expiry) {
-		slog.Warn("Token has already expired", "tokenValue", jobToken.Value, "expiry", jobToken.Expiry)
+	durableTokenInactive := jobToken.DiggerJobDatabaseID != nil && (jobToken.RevokedAt != nil || jobToken.ActivatedAt == nil)
+	if durableTokenInactive || time.Now().After(jobToken.Expiry) {
+		slog.Warn("Job token is inactive", "jobTokenId", jobToken.ID, "expiry", jobToken.Expiry)
 		c.String(http.StatusForbidden, "Token has expired")
 		c.Abort()
 		return nil, fmt.Errorf("token has expired")
 	}
 
-	if err != nil {
-		slog.Error("Error while fetching token from database", "error", err)
-		c.String(http.StatusInternalServerError, "Error occurred while fetching database")
-		c.Abort()
-		return nil, fmt.Errorf("could not fetch cli token")
-	}
-
-	slog.Debug("Token verified", "tokenValue", jobToken.Value, "accessLevel", jobToken.Type, "expiry", jobToken.Expiry)
+	slog.Debug("Token verified", "jobTokenId", jobToken.ID, "accessLevel", jobToken.Type, "expiry", jobToken.Expiry)
 	return jobToken, nil
 }

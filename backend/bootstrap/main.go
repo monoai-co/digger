@@ -119,6 +119,11 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 
 	//database migrations
 	models.ConnectDatabase()
+	diggerController.ControlPlaneDatabaseIdentity = os.Getenv("DIGGER_CONTROL_PLANE_DATABASE_IDENTITY")
+	if writerEpoch, err := strconv.ParseInt(os.Getenv("DIGGER_CONTROL_PLANE_WRITER_EPOCH"), 10, 64); err == nil {
+		diggerController.ControlPlaneWriterEpoch = writerEpoch
+	}
+	diggerController.ExecutionGrantSecret = []byte(os.Getenv("DIGGER_EXECUTION_GRANT_SECRET"))
 	githubWebhookProcessor := controllers.NewGithubWebhookProcessor(
 		models.DB,
 		diggerController.ProcessGithubWebhookDelivery,
@@ -231,6 +236,7 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	authorized.GET("/repos/:repo/projects/:projectName/runs", controllers.RunHistoryForProject)
 
 	authorized.POST("/repos/:repo/projects/:projectName/jobs/:jobId/set-status", diggerController.SetJobStatusForProject)
+	authorized.POST("/v1/jobs/:jobId/execution-claims", diggerController.ClaimJobExecution)
 
 	authorized.GET("/repos/:repo/projects", controllers.FindProjectsForRepo)
 	authorized.POST("/repos/:repo/report-projects", controllers.ReportProjectsForRepo)

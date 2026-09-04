@@ -28,6 +28,10 @@ func (n NoopApi) ReportProject(namespace string, projectName string, configurati
 	return nil
 }
 
+func (n NoopApi) ClaimProjectJobExecution(string, string, string, ExecutionClaimRequest) (*ExecutionClaimResponse, error) {
+	return nil, fmt.Errorf("durable execution claims require a backend")
+}
+
 func (n NoopApi) ReportProjectJobStatus(repo string, projectName string, jobId string, status string, timestamp time.Time, summary *iac_utils.IacSummary, planJson string, PrCommentUrl string, PrCommentId string, terraformOutput string, iacUtils iac_utils.IacUtils) (*scheduler.SerializedBatch, error) {
 	return nil, nil
 }
@@ -41,9 +45,14 @@ func (n NoopApi) DownloadJobArtefact(downloadTo string) (*string, error) {
 }
 
 type DiggerApi struct {
-	DiggerHost string
-	AuthToken  string
-	HttpClient *http.Client
+	DiggerHost     string
+	AuthToken      string
+	HttpClient     *http.Client
+	ExecutionGrant string
+}
+
+func (d *DiggerApi) SetExecutionGrant(grant string) {
+	d.ExecutionGrant = grant
 }
 
 func (d DiggerApi) ReportProject(namespace string, projectName string, configurationYaml string) error {
@@ -73,6 +82,9 @@ func (d DiggerApi) ReportProject(namespace string, projectName string, configura
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", d.AuthToken))
+	if d.ExecutionGrant != "" {
+		req.Header.Set("X-Digger-Execution-Grant", d.ExecutionGrant)
+	}
 
 	resp, err := d.HttpClient.Do(req)
 
@@ -139,6 +151,9 @@ func (d DiggerApi) ReportProjectJobStatus(repo string, projectName string, jobId
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", d.AuthToken))
+	if d.ExecutionGrant != "" {
+		req.Header.Set("X-Digger-Execution-Grant", d.ExecutionGrant)
+	}
 
 	resp, err := d.HttpClient.Do(req)
 
@@ -295,7 +310,7 @@ func NewBackendApi(hostName string, authToken string) Api {
 		slog.Warn("running in 'backendless' mode - features that require backend will not be available")
 		backendApi = NoopApi{}
 	} else {
-		backendApi = DiggerApi{
+		backendApi = &DiggerApi{
 			DiggerHost: hostName,
 			AuthToken:  authToken,
 			HttpClient: http.DefaultClient,

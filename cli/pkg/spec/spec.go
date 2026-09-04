@@ -42,6 +42,22 @@ func RunSpec(
 		slog.Error("could not get backend api", "error", err)
 		usage.ReportErrorAndExit(spec.VCS.Actor, fmt.Sprintf("could not get backend api: %v", err), 1)
 	}
+	if spec.OperationID != "" {
+		claimRequest, err := backend2.BuildExecutionClaimRequest(spec.VCS.RepoFullname, spec.Job.ProjectName, spec.OperationID, spec.ProtocolVersion, spec.WriterEpoch)
+		if err != nil {
+			return fmt.Errorf("build execution claim: %w", err)
+		}
+		claim, err := backendApi.ClaimProjectJobExecution(spec.VCS.RepoFullname, spec.Job.ProjectName, spec.JobId, claimRequest)
+		if err != nil {
+			return fmt.Errorf("claim exact job execution: %w", err)
+		}
+		grantAwareBackend, ok := backendApi.(interface{ SetExecutionGrant(string) })
+		if !ok || claim == nil || claim.ExecutionGrant == "" {
+			return fmt.Errorf("backend did not provide a usable execution grant")
+		}
+		grantAwareBackend.SetExecutionGrant(claim.ExecutionGrant)
+		spec.ExecutionGrant = claim.ExecutionGrant
+	}
 
 	// for additional output reporting
 	diggerOutPath := os.Getenv("DIGGER_OUT")

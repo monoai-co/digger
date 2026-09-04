@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,11 +24,33 @@ const GithubWorkflowDispatchEffectKind = "github_workflow_dispatch"
 
 var ErrDurableJobDispatchClaim = errors.New("durable job dispatch is not owned by this outbox claim")
 var ErrDurableJobDispatchConflict = errors.New("durable job dispatch state does not match its bound operation")
+var ErrDurableJobDispatchNotReady = errors.New("durable job dispatch is not yet committed")
 
 type DurableJobDispatchPreparation struct {
 	Job          *DiggerJob
 	GithubAppID  int64
 	SkipProvider bool
+}
+
+type DurableExecutionClaimRequest struct {
+	OperationID         string
+	DiggerJobID         string
+	RepositoryFullName  string
+	ProjectName         string
+	RunID               int64
+	RunAttempt          int64
+	WorkflowRef         string
+	WorkflowSHA         string
+	ActionRef           string
+	CLISHA256           string
+	ProtocolVersion     int
+	DispatchWriterEpoch int64
+}
+
+type DurableExecutionClaimReceipt struct {
+	Granted        bool
+	AlreadyGranted bool
+	ExecutionGrant string
 }
 
 type GithubWorkflowDispatchPayload struct {
@@ -531,8 +554,190 @@ func (db *Database) PrepareDurableJobDispatch(
 		if result.RowsAffected != 1 {
 			return ErrDurableJobDispatchConflict
 		}
+		if state.Job.Status == scheduler.DiggerJobCreated || state.Job.Status == scheduler.DiggerJobQueuedForRun {
+			result = tx.Model(&DiggerJob{}).
+				Where("id = ? AND status IN ?", state.Job.ID, []scheduler.DiggerJobStatus{scheduler.DiggerJobCreated, scheduler.DiggerJobQueuedForRun}).
+				Updates(map[string]any{"status": scheduler.DiggerJobTriggered, "status_version": gorm.Expr("CASE WHEN status_version < ? THEN ? ELSE status_version END", 1, 1), "status_updated_at": now, "updated_at": now})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrDurableJobDispatchConflict
+			}
+			state.Job.Status = scheduler.DiggerJobTriggered
+			state.Job.StatusVersion = 1
+		}
 		preparation = &DurableJobDispatchPreparation{Job: &state.Job, GithubAppID: state.Delivery.GithubAppID}
 		return nil
 	})
 	return preparation, err
+}
+
+func (db *Database) ClaimDurableJobExecution(
+	ctx context.Context,
+	request DurableExecutionClaimRequest,
+	jobTokenValue string,
+	grantSecret []byte,
+	databaseIdentity string,
+	writerEpoch int64,
+) (*DurableExecutionClaimReceipt, error) {
+	if !validDurableExecutionClaimRequest(request) || jobTokenValue == "" || len(grantSecret) < 32 {
+		return nil, ErrDurableJobDispatchClaim
+	}
+	var receipt *DurableExecutionClaimReceipt
+	err := db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, true, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		now, err := databaseTransactionNow(tx, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if request.ProtocolVersion != operation.ProtocolVersion {
+			return ErrDurableJobDispatchClaim
+		}
+
+		var effect OutboxEffect
+		effectQuery := tx
+		if tx.Dialector.Name() == "postgres" {
+			effectQuery = effectQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := effectQuery.First(&effect, "operation_id = ? AND effect_kind = ?", request.OperationID, GithubWorkflowDispatchEffectKind).Error; err != nil {
+			return fmt.Errorf("load execution claim dispatch effect: %w", err)
+		}
+		if effect.Status != OutboxEffectSucceeded {
+			if effect.Status == OutboxEffectProcessing {
+				return ErrDurableJobDispatchNotReady
+			}
+			return ErrDurableJobDispatchClaim
+		}
+		state, err := loadDurableWorkflowDispatchStateTx(tx, &effect)
+		if err != nil {
+			return err
+		}
+		if state.Job.DiggerJobID != request.DiggerJobID || state.Job.ProjectName != request.ProjectName ||
+			state.Batch.RepoFullName != request.RepositoryFullName || state.Job.ProtocolVersion != request.ProtocolVersion ||
+			state.Job.WriterEpoch == nil || *state.Job.WriterEpoch != request.DispatchWriterEpoch ||
+			state.JobOperation.Status != ControlOperationPending || state.Token.ActivatedAt == nil || state.Token.RevokedAt != nil ||
+			!state.Token.Expiry.After(now) || !hmac.Equal([]byte(state.Token.Value), []byte(jobTokenValue)) {
+			return ErrDurableJobDispatchClaim
+		}
+		if state.Job.Status != scheduler.DiggerJobTriggered && state.Job.Status != scheduler.DiggerJobStarted {
+			return ErrDurableJobDispatchClaim
+		}
+
+		var existing ExecutionClaimAttempt
+		err = tx.First(&existing, "operation_id = ? AND run_id = ? AND run_attempt = ?", request.OperationID, request.RunID, request.RunAttempt).Error
+		if err == nil {
+			if !sameExecutionClaimIdentity(&existing, request) {
+				return ErrDurableJobDispatchConflict
+			}
+			replayGrant := durableExecutionGrant(request, jobTokenValue, grantSecret, existing.ExpectedWriterEpoch)
+			replayGrantDigest := sha256.Sum256([]byte(replayGrant))
+			if existing.State == ExecutionClaimGranted && existing.GrantTokenSHA256 == hex.EncodeToString(replayGrantDigest[:]) {
+				receipt = &DurableExecutionClaimReceipt{Granted: true, AlreadyGranted: true, ExecutionGrant: replayGrant}
+				return nil
+			}
+			receipt = &DurableExecutionClaimReceipt{Granted: false}
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		grant := durableExecutionGrant(request, jobTokenValue, grantSecret, writerEpoch)
+		grantDigest := sha256.Sum256([]byte(grant))
+		grantSHA256 := hex.EncodeToString(grantDigest[:])
+
+		var grantedCount int64
+		if err := tx.Model(&ExecutionClaimAttempt{}).Where("operation_id = ? AND state = ?", request.OperationID, ExecutionClaimGranted).Count(&grantedCount).Error; err != nil {
+			return err
+		}
+		claim := executionClaimAttempt(request, writerEpoch, now)
+		if grantedCount > 0 {
+			claim.State = ExecutionClaimRejected
+			claim.RejectedAt = &now
+			if err := tx.Create(&claim).Error; err != nil {
+				return err
+			}
+			receipt = &DurableExecutionClaimReceipt{Granted: false}
+			return nil
+		}
+
+		claim.State = ExecutionClaimGranted
+		claim.GrantTokenSHA256 = grantSHA256
+		claim.GrantedAt = &now
+		if err := tx.Create(&claim).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&DiggerJob{}).
+			Where("id = ? AND status = ? AND status_version <= ?", state.Job.ID, scheduler.DiggerJobTriggered, 2).
+			Updates(map[string]any{"status": scheduler.DiggerJobStarted, "status_version": int64(2), "status_updated_at": now, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrDurableJobDispatchConflict
+		}
+		receipt = &DurableExecutionClaimReceipt{Granted: true, ExecutionGrant: grant}
+		return nil
+	})
+	return receipt, err
+}
+
+func validDurableExecutionClaimRequest(request DurableExecutionClaimRequest) bool {
+	if !operation.ID(request.OperationID).Valid() || request.DiggerJobID == "" || request.RepositoryFullName == "" || request.ProjectName == "" ||
+		request.RunID <= 0 || request.RunAttempt <= 0 || request.ProtocolVersion <= 0 || request.DispatchWriterEpoch <= 0 ||
+		strings.TrimSpace(request.WorkflowRef) == "" || strings.TrimSpace(request.ActionRef) == "" {
+		return false
+	}
+	if len(request.WorkflowRef) > 1024 || len(request.ActionRef) > 1024 {
+		return false
+	}
+	return validLowerHexDigest(request.CLISHA256, sha256.Size*2) &&
+		(validLowerHexDigest(request.WorkflowSHA, 40) || validLowerHexDigest(request.WorkflowSHA, sha256.Size*2))
+}
+
+func validLowerHexDigest(value string, length int) bool {
+	if len(value) != length || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func executionClaimAttempt(request DurableExecutionClaimRequest, writerEpoch int64, now time.Time) ExecutionClaimAttempt {
+	return ExecutionClaimAttempt{
+		ID:                  uuid.New(),
+		ControlOperationID:  request.OperationID,
+		RunID:               request.RunID,
+		RunAttempt:          request.RunAttempt,
+		WorkflowRef:         request.WorkflowRef,
+		WorkflowSHA:         request.WorkflowSHA,
+		ActionRef:           request.ActionRef,
+		CLISHA256:           request.CLISHA256,
+		ProtocolVersion:     request.ProtocolVersion,
+		ExpectedWriterEpoch: writerEpoch,
+		DispatchWriterEpoch: request.DispatchWriterEpoch,
+		State:               ExecutionClaimPending,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+}
+
+func sameExecutionClaimIdentity(existing *ExecutionClaimAttempt, request DurableExecutionClaimRequest) bool {
+	return existing != nil && existing.ControlOperationID == request.OperationID && existing.RunID == request.RunID &&
+		existing.RunAttempt == request.RunAttempt && existing.WorkflowRef == request.WorkflowRef && existing.WorkflowSHA == request.WorkflowSHA &&
+		existing.ActionRef == request.ActionRef && existing.CLISHA256 == request.CLISHA256 &&
+		existing.ProtocolVersion == request.ProtocolVersion && existing.DispatchWriterEpoch == request.DispatchWriterEpoch
+}
+
+func durableExecutionGrant(request DurableExecutionClaimRequest, jobTokenValue string, grantSecret []byte, grantingWriterEpoch ...int64) string {
+	mac := hmac.New(sha256.New, grantSecret)
+	mac.Write([]byte("digger-execution-grant\x00"))
+	mac.Write([]byte(jobTokenValue))
+	mac.Write([]byte("\x00"))
+	mac.Write([]byte(request.OperationID))
+	currentWriterEpoch := request.DispatchWriterEpoch
+	if len(grantingWriterEpoch) == 1 {
+		currentWriterEpoch = grantingWriterEpoch[0]
+	}
+	mac.Write([]byte(fmt.Sprintf("\x00%d\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d", request.RunID, request.RunAttempt, request.WorkflowRef, request.WorkflowSHA, request.ActionRef, request.CLISHA256, request.ProtocolVersion, request.DispatchWriterEpoch, currentWriterEpoch)))
+	return hex.EncodeToString(mac.Sum(nil))
 }

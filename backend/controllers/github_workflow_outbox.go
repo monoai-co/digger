@@ -52,7 +52,7 @@ func NewGithubWorkflowOutboxDispatch(
 		if preparation == nil || preparation.Job == nil || preparation.Job.Batch == nil {
 			return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
 		}
-		if preparation.Job.OperationID == nil || request.OperationID != *preparation.Job.OperationID {
+		if preparation.Job.OperationID == nil || preparation.Job.WriterEpoch == nil || request.OperationID != *preparation.Job.OperationID {
 			return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
 		}
 		if preparation.SkipProvider {
@@ -72,7 +72,7 @@ func NewGithubWorkflowOutboxDispatch(
 		}
 		workflowSpec.OperationID = *preparation.Job.OperationID
 		workflowSpec.ProtocolVersion = job.ProtocolVersion
-		workflowSpec.WriterEpoch = request.WriterEpoch
+		workflowSpec.WriterEpoch = *job.WriterEpoch
 		runName, err := services.GetRunNameFromJob(*job)
 		if err != nil {
 			return OutboxDispatchResult{}, err
