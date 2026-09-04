@@ -144,11 +144,29 @@ func CanonicalDependencyOperationIDs(raw []byte) ([]byte, error) {
 // loadDurableWorkflowDispatchStateTx validates the complete immutable route
 // from an outbox effect through its job and batch operations to the signed
 // GitHub delivery and active tenant binding. Callers must already hold the
-// effect row lock in the same transaction.
+// effect row lock in the same transaction. The batch is the graph mutex and is
+// acquired before any operation, job, or token row.
 func loadDurableWorkflowDispatchStateTx(tx *gorm.DB, effect *OutboxEffect) (*durableWorkflowDispatchState, error) {
 	if effect == nil || effect.EffectKind != GithubWorkflowDispatchEffectKind || effect.ControlOperationID == "" ||
 		effect.EffectKey != "job:"+effect.ControlOperationID || !effect.ValidPayloadDigest() {
 		return nil, ErrDurableJobDispatchConflict
+	}
+
+	var route DiggerJob
+	if err := tx.Select("id", "batch_id").First(&route, "operation_id = ?", effect.ControlOperationID).Error; err != nil {
+		return nil, fmt.Errorf("load durable dispatch route: %w", err)
+	}
+	if route.BatchID == nil {
+		return nil, ErrDurableJobDispatchConflict
+	}
+
+	var batch DiggerBatch
+	batchQuery := tx
+	if tx.Dialector.Name() == "postgres" {
+		batchQuery = batchQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := batchQuery.First(&batch, "id = ?", *route.BatchID).Error; err != nil {
+		return nil, fmt.Errorf("load durable dispatch batch: %w", err)
 	}
 
 	var jobOperation ControlOperation
@@ -171,7 +189,7 @@ func loadDurableWorkflowDispatchStateTx(tx *gorm.DB, effect *OutboxEffect) (*dur
 	if err := jobQuery.First(&job, "operation_id = ?", effect.ControlOperationID).Error; err != nil {
 		return nil, fmt.Errorf("load durable dispatch job: %w", err)
 	}
-	if job.OperationID == nil || *job.OperationID != effect.ControlOperationID || job.BatchID == nil ||
+	if job.ID != route.ID || job.OperationID == nil || *job.OperationID != effect.ControlOperationID || job.BatchID == nil || *job.BatchID != *route.BatchID ||
 		job.ProtocolVersion != jobOperation.ProtocolVersion || job.WriterEpoch == nil || *job.WriterEpoch != jobOperation.WriterEpoch {
 		return nil, ErrDurableJobDispatchConflict
 	}
@@ -180,14 +198,6 @@ func loadDurableWorkflowDispatchStateTx(tx *gorm.DB, effect *OutboxEffect) (*dur
 		return nil, ErrDurableJobDispatchConflict
 	}
 
-	var batch DiggerBatch
-	batchQuery := tx
-	if tx.Dialector.Name() == "postgres" {
-		batchQuery = batchQuery.Clauses(clause.Locking{Strength: "SHARE"})
-	}
-	if err := batchQuery.First(&batch, "id = ?", *job.BatchID).Error; err != nil {
-		return nil, fmt.Errorf("load durable dispatch batch: %w", err)
-	}
 	if batch.OperationID == nil || batch.WriterEpoch == nil || batch.ID.String() != *job.BatchID ||
 		batch.ProtocolVersion != job.ProtocolVersion || *batch.WriterEpoch != *job.WriterEpoch {
 		return nil, ErrDurableJobDispatchConflict
