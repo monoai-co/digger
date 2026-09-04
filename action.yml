@@ -251,7 +251,11 @@ inputs:
     required: false
     default: ""
   digger-version:
-    description: "Pre-compiled version of digger CLI to install. Must correspond to a valid release tag (vX.Y.Z). This value overrides the version derived from the github.action_ref."
+    description: "Pre-compiled version of digger CLI to install. Must correspond to a valid release tag (vX.Y.Z or a prerelease of it). This value overrides the version derived from the github.action_ref."
+    required: false
+    default: ""
+  digger-cli-sha256:
+    description: "Expected lowercase SHA-256 digest of the pre-compiled Digger CLI. Required in prebuilt mode."
     required: false
     default: ""
   digger-os:
@@ -288,8 +292,8 @@ runs:
       run: |
         set -euo pipefail
 
-        if [[ ! ( -z "$INPUT_DIGGER_VERSION" || "$INPUT_DIGGER_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ) ]]; then
-          echo "::error::Invalid digger-version input $INPUT_DIGGER_VERSION. Must be empty string or match vX.Y.Z"
+        if [[ ! ( -z "$INPUT_DIGGER_VERSION" || "$INPUT_DIGGER_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ) ]]; then
+          echo "::error::Invalid digger-version input $INPUT_DIGGER_VERSION. Must be empty or a semantic version tag"
           exit 1
         fi
 
@@ -556,6 +560,7 @@ runs:
       if: ${{ steps.determine-binary-mode.outputs.binary-mode == 'prebuilt' }}
       env:
         DIGGER_VERSION: ${{ inputs.digger-version || github.action_ref }}
+        DIGGER_CLI_SHA256: ${{ inputs.digger-cli-sha256 }}
         DIGGER_OS: ${{ inputs.digger-os }}
         DIGGER_ARCH: ${{ inputs.digger-arch }}
         PLAN_UPLOAD_DESTINATION: ${{ inputs.upload-plan-destination }}
@@ -599,12 +604,12 @@ runs:
 
         if [[ ${{ inputs.ee }} == "true" ]]; then
           if [[ ${{ inputs.fips }} == "true" ]]; then
-            DOWNLOAD_URL="https://github.com/diggerhq/digger/releases/download/${DIGGER_VERSION}/digger-ee-cli-${DIGGER_OS}-${DIGGER_ARCH}-fips"
+            DOWNLOAD_URL="https://github.com/monoai-co/digger/releases/download/${DIGGER_VERSION}/digger-ee-cli-${DIGGER_OS}-${DIGGER_ARCH}-fips"
           else
-            DOWNLOAD_URL="https://github.com/diggerhq/digger/releases/download/${DIGGER_VERSION}/digger-ee-cli-${DIGGER_OS}-${DIGGER_ARCH}"
+            DOWNLOAD_URL="https://github.com/monoai-co/digger/releases/download/${DIGGER_VERSION}/digger-ee-cli-${DIGGER_OS}-${DIGGER_ARCH}"
           fi
         else
-          DOWNLOAD_URL="https://github.com/diggerhq/digger/releases/download/${DIGGER_VERSION}/digger-cli-${DIGGER_OS}-${DIGGER_ARCH}"
+          DOWNLOAD_URL="https://github.com/monoai-co/digger/releases/download/${DIGGER_VERSION}/digger-cli-${DIGGER_OS}-${DIGGER_ARCH}"
         fi
 
         echo "Downloading from: $DOWNLOAD_URL"
@@ -618,7 +623,7 @@ runs:
           echo "3. Network connectivity issues"
           echo ""
           echo "Suggestions:"
-          echo "- Check if release ${DIGGER_VERSION} exists at: https://github.com/diggerhq/digger/releases"
+          echo "- Check if release ${DIGGER_VERSION} exists at: https://github.com/monoai-co/digger/releases"
           echo "- Verify the architecture combination is supported"
           echo "- Try using a different release version"
           exit 1
@@ -628,6 +633,13 @@ runs:
           echo "Downloaded file is empty or doesn't exist"
           exit 1
         fi
+
+        if [[ ! "$DIGGER_CLI_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::digger-cli-sha256 must be a 64-character lowercase SHA-256 digest"
+          exit 1
+        fi
+
+        printf '%s  %s\n' "$DIGGER_CLI_SHA256" digger | shasum -a 256 --check --status
 
         chmod +x digger
 
