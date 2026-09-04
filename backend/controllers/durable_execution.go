@@ -7,6 +7,7 @@ import (
 
 	"github.com/diggerhq/digger/backend/middleware"
 	"github.com/diggerhq/digger/backend/models"
+	"github.com/diggerhq/digger/libs/operation"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,11 +23,12 @@ type claimJobExecutionRequest struct {
 	CLISHA256           string `json:"cli_sha256"`
 	ProtocolVersion     int    `json:"protocol_version"`
 	DispatchWriterEpoch int64  `json:"dispatch_writer_epoch"`
+	OIDCToken           string `json:"oidc_token"`
 }
 
 func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 	activeGrantSecret := d.ExecutionGrantSecrets[d.ExecutionGrantSigningKeyID]
-	if strings.TrimSpace(d.ControlPlaneDatabaseIdentity) == "" || d.ControlPlaneWriterEpoch <= 0 || len(activeGrantSecret) < 32 || strings.TrimSpace(d.ExecutionGrantSigningKeyID) == "" {
+	if strings.TrimSpace(d.ControlPlaneDatabaseIdentity) == "" || d.ControlPlaneWriterEpoch <= 0 || len(activeGrantSecret) < 32 || strings.TrimSpace(d.ExecutionGrantSigningKeyID) == "" || d.ExecutionIdentityVerifier == nil || !immutableActionRef.MatchString(d.TrustedActionRef) || !cliDigest.MatchString(d.TrustedCLISHA256) {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "durable execution claims are not configured"})
 		return
 	}
@@ -36,12 +38,27 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		return
 	}
 	var request claimJobExecutionRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64*1024)
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid execution claim"})
 		return
 	}
 	if request.ProjectName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "project identity is required"})
+		return
+	}
+	audience, err := operation.ExecutionClaimAudience(request.OperationID, c.Param("jobId"))
+	if err != nil || request.ProtocolVersion != operation.OIDCProtocolVersion || request.ActionRef != d.TrustedActionRef || request.CLISHA256 != d.TrustedCLISHA256 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "execution identity rejected"})
+		return
+	}
+	identity, err := d.ExecutionIdentityVerifier.Verify(c.Request.Context(), request.OIDCToken, audience)
+	if errors.Is(err, errExecutionIdentityUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "execution identity verification unavailable"})
+		return
+	}
+	if err != nil || identity == nil || identity.RepositoryFullName != request.RepositoryFullName || identity.RunID != request.RunID || identity.RunAttempt != request.RunAttempt || identity.WorkflowRef != request.WorkflowRef || identity.WorkflowSHA != request.WorkflowSHA || identity.EventName != "workflow_dispatch" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "execution identity rejected"})
 		return
 	}
 	receipt, err := models.DB.ClaimDurableJobExecution(c.Request.Context(), models.DurableExecutionClaimRequest{
@@ -51,6 +68,10 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		ProjectName:         request.ProjectName,
 		RunID:               request.RunID,
 		RunAttempt:          request.RunAttempt,
+		RepositoryID:        identity.RepositoryID,
+		OIDCIssuer:          identity.Issuer,
+		OIDCAudience:        identity.Audience,
+		OIDCSubject:         identity.Subject,
 		WorkflowRef:         request.WorkflowRef,
 		WorkflowSHA:         request.WorkflowSHA,
 		ActionRef:           request.ActionRef,

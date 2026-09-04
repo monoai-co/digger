@@ -40,6 +40,10 @@ type DurableExecutionClaimRequest struct {
 	ProjectName         string
 	RunID               int64
 	RunAttempt          int64
+	RepositoryID        int64
+	OIDCIssuer          string
+	OIDCAudience        string
+	OIDCSubject         string
 	WorkflowRef         string
 	WorkflowSHA         string
 	ActionRef           string
@@ -756,7 +760,12 @@ func decodeDurableWorkflowDispatchReceipt(payload []byte) (*durableWorkflowDispa
 func validDurableExecutionClaimRequest(request DurableExecutionClaimRequest) bool {
 	if !operation.ID(request.OperationID).Valid() || request.DiggerJobID == "" || request.RepositoryFullName == "" || request.ProjectName == "" ||
 		request.RunID <= 0 || request.RunAttempt <= 0 || request.ProtocolVersion <= 0 || request.DispatchWriterEpoch <= 0 ||
+		request.RepositoryID <= 0 || strings.TrimSpace(request.OIDCIssuer) == "" || strings.TrimSpace(request.OIDCAudience) == "" || strings.TrimSpace(request.OIDCSubject) == "" ||
 		strings.TrimSpace(request.WorkflowRef) == "" || strings.TrimSpace(request.ActionRef) == "" {
+		return false
+	}
+	audience, err := operation.ExecutionClaimAudience(request.OperationID, request.DiggerJobID)
+	if err != nil || request.OIDCAudience != audience || request.OIDCIssuer != "https://token.actions.githubusercontent.com" || len(request.OIDCAudience) > 1024 || len(request.OIDCSubject) > 1024 || request.ProtocolVersion != operation.OIDCProtocolVersion {
 		return false
 	}
 	if len(request.WorkflowRef) > 1024 || len(request.ActionRef) > 1024 {
@@ -787,6 +796,10 @@ func executionClaimAttempt(request DurableExecutionClaimRequest, jobDatabaseID u
 		JobTokenID:          jobTokenID,
 		RunID:               request.RunID,
 		RunAttempt:          request.RunAttempt,
+		RepositoryID:        request.RepositoryID,
+		OIDCIssuer:          request.OIDCIssuer,
+		OIDCAudience:        request.OIDCAudience,
+		OIDCSubject:         request.OIDCSubject,
 		WorkflowRef:         request.WorkflowRef,
 		WorkflowSHA:         request.WorkflowSHA,
 		ActionRef:           request.ActionRef,
@@ -806,6 +819,7 @@ func executionClaimAttempt(request DurableExecutionClaimRequest, jobDatabaseID u
 func sameExecutionClaimIdentity(existing *ExecutionClaimAttempt, request DurableExecutionClaimRequest, jobDatabaseID uint, jobTokenID uint, claimSHA256 string) bool {
 	return existing != nil && existing.ControlOperationID == request.OperationID && existing.RunID == request.RunID &&
 		existing.RunAttempt == request.RunAttempt && existing.WorkflowRef == request.WorkflowRef && existing.WorkflowSHA == request.WorkflowSHA &&
+		existing.RepositoryID == request.RepositoryID && existing.OIDCIssuer == request.OIDCIssuer && existing.OIDCAudience == request.OIDCAudience && existing.OIDCSubject == request.OIDCSubject &&
 		existing.ActionRef == request.ActionRef && existing.CLISHA256 == request.CLISHA256 &&
 		existing.ProtocolVersion == request.ProtocolVersion && existing.DispatchWriterEpoch == request.DispatchWriterEpoch &&
 		existing.DiggerJobID == request.DiggerJobID && existing.DiggerJobDatabaseID == jobDatabaseID && existing.JobTokenID == jobTokenID &&
@@ -821,6 +835,10 @@ type durableExecutionClaimIdentity struct {
 	ProjectName         string `json:"project_name"`
 	RunID               int64  `json:"run_id"`
 	RunAttempt          int64  `json:"run_attempt"`
+	RepositoryID        int64  `json:"repository_id"`
+	OIDCIssuer          string `json:"oidc_issuer"`
+	OIDCAudience        string `json:"oidc_audience"`
+	OIDCSubject         string `json:"oidc_subject"`
 	WorkflowRef         string `json:"workflow_ref"`
 	WorkflowSHA         string `json:"workflow_sha"`
 	ActionRef           string `json:"action_ref"`
@@ -842,6 +860,10 @@ func durableExecutionClaimSHA256(request DurableExecutionClaimRequest, jobDataba
 		ProjectName:         request.ProjectName,
 		RunID:               request.RunID,
 		RunAttempt:          request.RunAttempt,
+		RepositoryID:        request.RepositoryID,
+		OIDCIssuer:          request.OIDCIssuer,
+		OIDCAudience:        request.OIDCAudience,
+		OIDCSubject:         request.OIDCSubject,
 		WorkflowRef:         request.WorkflowRef,
 		WorkflowSHA:         request.WorkflowSHA,
 		ActionRef:           request.ActionRef,

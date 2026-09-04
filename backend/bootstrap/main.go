@@ -127,6 +127,9 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		diggerController.ControlPlaneWriterEpoch = writerEpoch
 	}
 	diggerController.ExecutionGrantSigningKeyID = os.Getenv("DIGGER_EXECUTION_GRANT_KEY_ID")
+	diggerController.ExecutionIdentityVerifier = controllers.NewGithubExecutionIdentityVerifier()
+	diggerController.TrustedActionRef = os.Getenv("DIGGER_TRUSTED_ACTION_REF")
+	diggerController.TrustedCLISHA256 = os.Getenv("DIGGER_TRUSTED_CLI_SHA256")
 	executionGrantSecrets, executionGrantSecretsErr := buildExecutionGrantSecrets(
 		diggerController.ExecutionGrantSigningKeyID,
 		os.Getenv("DIGGER_EXECUTION_GRANT_SECRET"),

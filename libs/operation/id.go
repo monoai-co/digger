@@ -11,9 +11,17 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	idPrefix        = "op1_"
+	ProtocolVersion     = 2
+	OIDCProtocolVersion = 2
+	idPrefix            = "op1_"
 )
+
+func ExecutionClaimAudience(operationID string, jobID string) (string, error) {
+	if !ID(operationID).Valid() || strings.TrimSpace(jobID) == "" {
+		return "", ErrInvalidComponent
+	}
+	return "opentaco-control-plane:execution:" + operationID + ":job:" + jobID, nil
+}
 
 // ID is a stable identity for one logical control-plane operation. It is safe
 // to include in provider idempotency markers and workflow inputs.

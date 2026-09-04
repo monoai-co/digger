@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"context"
 	"fmt"
 	"github.com/diggerhq/digger/cli/pkg/digger"
 	"github.com/diggerhq/digger/cli/pkg/usage"
@@ -12,6 +13,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -54,7 +57,13 @@ func RunSpec(
 		if err != nil {
 			return fmt.Errorf("build execution claim: %w", err)
 		}
-		claim, err := backendApi.ClaimProjectJobExecution(spec.VCS.RepoFullname, spec.Job.ProjectName, spec.JobId, claimRequest)
+		claimer, ok := backendApi.(backend2.ContextExecutionClaimer)
+		if !ok {
+			return fmt.Errorf("backend does not support cancellable execution claims")
+		}
+		claimContext, cancelClaim := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		claim, err := claimer.ClaimProjectJobExecutionContext(claimContext, spec.VCS.RepoFullname, spec.Job.ProjectName, spec.JobId, claimRequest)
+		cancelClaim()
 		if err != nil {
 			return fmt.Errorf("claim exact job execution: %w", err)
 		}

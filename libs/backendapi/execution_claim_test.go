@@ -2,6 +2,7 @@ package backendapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -148,11 +149,12 @@ func TestDiggerApiDurableStatusCallbackRetriesStableIdentityAndBody(t *testing.T
 		HttpClient:               &client,
 		durableStatusRetryWindow: time.Second,
 		durableStatusRetryDelay:  time.Millisecond,
+		oidcTokenProvider:        func(context.Context, string) (string, error) { return "test-oidc-token", nil },
 	}
 	claimRequest := ExecutionClaimRequest{
 		RepositoryFullName:  "monoai-co/repo",
 		ProjectName:         "root",
-		OperationID:         "op1_operation",
+		OperationID:         "op1_" + strings.Repeat("a", 64),
 		ProtocolVersion:     2,
 		DispatchWriterEpoch: 7,
 	}
@@ -199,7 +201,7 @@ func TestDiggerApiDurableStatusCallbackRetriesStableIdentityAndBody(t *testing.T
 	require.Equal(t, "/v1/jobs/job-1/status-callbacks/"+callback.CallbackID.String(), callbackPaths[0])
 	require.Equal(t, "monoai-co/repo", callback.RepositoryFullName)
 	require.Equal(t, "root", callback.ProjectName)
-	require.Equal(t, "op1_operation", callback.OperationID)
+	require.Equal(t, claimRequest.OperationID, callback.OperationID)
 	require.Equal(t, 2, callback.ProtocolVersion)
 	require.Equal(t, int64(7), callback.DispatchWriterEpoch)
 	require.Equal(t, "succeeded", callback.TargetStatus)

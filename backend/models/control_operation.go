@@ -84,6 +84,10 @@ type ExecutionClaimAttempt struct {
 	ExactJobToken       *JobToken           `gorm:"foreignKey:DiggerJobDatabaseID,JobTokenID;references:DiggerJobDatabaseID,ID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	RunID               int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:2"`
 	RunAttempt          int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:3"`
+	RepositoryID        int64               `gorm:"not null;check:execution_claim_attempts_oidc_identity_check,repository_id > 0 AND length(oidc_issuer) BETWEEN 1 AND 256 AND length(oidc_audience) BETWEEN 1 AND 1024 AND length(oidc_subject) BETWEEN 1 AND 1024"`
+	OIDCIssuer          string              `gorm:"column:oidc_issuer;type:text;not null"`
+	OIDCAudience        string              `gorm:"column:oidc_audience;type:text;not null"`
+	OIDCSubject         string              `gorm:"column:oidc_subject;type:text;not null"`
 	WorkflowRef         string              `gorm:"type:text;not null"`
 	WorkflowSHA         string              `gorm:"type:text;not null"`
 	ActionRef           string              `gorm:"type:text;not null"`

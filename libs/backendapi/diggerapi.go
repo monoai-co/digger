@@ -2,6 +2,7 @@ package backendapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/diggerhq/digger/libs/comment_utils"
@@ -52,6 +53,7 @@ type DiggerApi struct {
 	durableExecutionContext  *durableExecutionContext
 	durableStatusRetryWindow time.Duration
 	durableStatusRetryDelay  time.Duration
+	oidcTokenProvider        func(context.Context, string) (string, error)
 }
 
 func (d *DiggerApi) SetExecutionGrant(grant string) {

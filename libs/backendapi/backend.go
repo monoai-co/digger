@@ -1,10 +1,15 @@
 package backendapi
 
 import (
+	"context"
 	"github.com/diggerhq/digger/libs/iac_utils"
 	"github.com/diggerhq/digger/libs/scheduler"
 	"time"
 )
+
+type ContextExecutionClaimer interface {
+	ClaimProjectJobExecutionContext(context.Context, string, string, string, ExecutionClaimRequest) (*ExecutionClaimResponse, error)
+}
 
 type Api interface {
 	ReportProject(repo string, projectName string, configuration string) error
@@ -26,6 +31,7 @@ type ExecutionClaimRequest struct {
 	CLISHA256           string `json:"cli_sha256"`
 	ProtocolVersion     int    `json:"protocol_version"`
 	DispatchWriterEpoch int64  `json:"dispatch_writer_epoch"`
+	OIDCToken           string `json:"oidc_token,omitempty"`
 }
 
 type ExecutionClaimResponse struct {

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/diggerhq/digger/libs/operation"
 )
 
 func BuildExecutionClaimRequest(repositoryFullName string, projectName string, operationID string, protocolVersion int, writerEpoch int64) (ExecutionClaimRequest, error) {
@@ -73,6 +75,10 @@ func positiveEnvironmentInt64(name string) (int64, error) {
 }
 
 func (d *DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jobID string, request ExecutionClaimRequest) (*ExecutionClaimResponse, error) {
+	return d.ClaimProjectJobExecutionContext(context.Background(), repo, projectName, jobID, request)
+}
+
+func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo string, projectName string, jobID string, request ExecutionClaimRequest) (*ExecutionClaimResponse, error) {
 	if request.RepositoryFullName != repo || request.ProjectName != projectName || strings.TrimSpace(jobID) == "" {
 		return nil, fmt.Errorf("execution claim route identity does not match its payload")
 	}
@@ -81,22 +87,35 @@ func (d *DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jo
 		return nil, fmt.Errorf("parse Digger backend URL: %w", err)
 	}
 	u.Path = filepath.Join(u.Path, "v1", "jobs", jobID, "execution-claims")
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("marshal execution claim: %w", err)
-	}
 	client := d.HttpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
+	claimClient := *client
+	claimClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &claimClient
 	deadline := time.Now().Add(2 * time.Minute)
 	retryDelay := 200 * time.Millisecond
 	for {
+		if request.ProtocolVersion >= operation.OIDCProtocolVersion {
+			audience, err := operation.ExecutionClaimAudience(request.OperationID, jobID)
+			if err != nil {
+				return nil, fmt.Errorf("build execution claim audience: %w", err)
+			}
+			request.OIDCToken, err = d.githubOIDCToken(ctx, client, audience)
+			if err != nil {
+				return nil, err
+			}
+		}
+		payload, err := json.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("marshal execution claim: %w", err)
+		}
 		requestTimeout := time.Until(deadline)
 		if requestTimeout > 15*time.Second {
 			requestTimeout = 15 * time.Second
 		}
-		requestContext, cancelRequest := context.WithTimeout(context.Background(), requestTimeout)
+		requestContext, cancelRequest := context.WithTimeout(ctx, requestTimeout)
 		req, err := http.NewRequestWithContext(requestContext, http.MethodPost, u.String(), bytes.NewReader(payload))
 		if err != nil {
 			cancelRequest()
@@ -147,7 +166,13 @@ func (d *DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jo
 			}
 			return nil, fmt.Errorf("execution claim rejected with status %d", responseStatus)
 		}
-		time.Sleep(retryDelay)
+		retryTimer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			retryTimer.Stop()
+			return nil, ctx.Err()
+		case <-retryTimer.C:
+		}
 		if retryDelay < 2*time.Second {
 			retryDelay *= 2
 			if retryDelay > 2*time.Second {
@@ -155,4 +180,53 @@ func (d *DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jo
 			}
 		}
 	}
+}
+
+func (d *DiggerApi) githubOIDCToken(ctx context.Context, client *http.Client, audience string) (string, error) {
+	if d.oidcTokenProvider != nil {
+		return d.oidcTokenProvider(ctx, audience)
+	}
+	requestURL := strings.TrimSpace(os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"))
+	requestToken := strings.TrimSpace(os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+	if requestURL == "" || requestToken == "" {
+		return "", fmt.Errorf("GitHub Actions OIDC token endpoint is unavailable")
+	}
+	u, err := url.Parse(requestURL)
+	if err != nil {
+		return "", fmt.Errorf("parse GitHub Actions OIDC token URL: %w", err)
+	}
+	query := u.Query()
+	query.Set("audience", audience)
+	u.RawQuery = query.Encode()
+	requestContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestContext, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("create GitHub Actions OIDC token request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+requestToken)
+	oidcClient := *client
+	oidcClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := oidcClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request GitHub Actions OIDC token: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub Actions OIDC token endpoint returned status %d", response.StatusCode)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64*1024))
+	if err := decoder.Decode(&body); err != nil {
+		return "", fmt.Errorf("decode GitHub Actions OIDC token response: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return "", fmt.Errorf("decode GitHub Actions OIDC token response: trailing JSON")
+	}
+	if strings.TrimSpace(body.Value) == "" || len(body.Value) > 32*1024 {
+		return "", fmt.Errorf("GitHub Actions OIDC token response is invalid")
+	}
+	return body.Value, nil
 }

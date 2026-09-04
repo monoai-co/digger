@@ -236,6 +236,10 @@ func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.D
 	var token models.JobToken
 	require.NoError(t, database.GormDB.First(&token, "digger_job_database_id = ?", job.ID).Error)
 	return job, models.DurableExecutionClaimRequest{
+		RepositoryID:        12345,
+		OIDCIssuer:          "https://token.actions.githubusercontent.com",
+		OIDCAudience:        "opentaco-control-plane:execution:" + *job.OperationID + ":job:" + job.DiggerJobID,
+		OIDCSubject:         "repo:monoai-co/sre:ref:refs/heads/main",
 		OperationID:         *job.OperationID,
 		DiggerJobID:         job.DiggerJobID,
 		RepositoryFullName:  "monoai-co/sre",
@@ -502,6 +506,10 @@ func TestPostgresRecoveredDispatchCanClaimThroughNewWriterEpoch(t *testing.T) {
 	var token models.JobToken
 	require.NoError(t, database.GormDB.First(&token, "digger_job_database_id = ?", job.ID).Error)
 	request := models.DurableExecutionClaimRequest{
+		RepositoryID:        12345,
+		OIDCIssuer:          "https://token.actions.githubusercontent.com",
+		OIDCAudience:        "opentaco-control-plane:execution:" + *job.OperationID + ":job:" + job.DiggerJobID,
+		OIDCSubject:         "repo:monoai-co/sre:ref:refs/heads/main",
 		OperationID:         *job.OperationID,
 		DiggerJobID:         job.DiggerJobID,
 		RepositoryFullName:  "monoai-co/sre",

@@ -44,6 +44,9 @@ type DiggerController struct {
 	ControlPlaneWriterEpoch            int64
 	ExecutionGrantSecrets              map[string][]byte
 	ExecutionGrantSigningKeyID         string
+	ExecutionIdentityVerifier          ExecutionIdentityVerifier
+	TrustedActionRef                   string
+	TrustedCLISHA256                   string
 	OutboxDispatcher                   interface{ Wake() }
 }
 

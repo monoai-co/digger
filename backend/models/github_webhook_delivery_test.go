@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/diggerhq/digger/libs/operation"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -277,7 +278,7 @@ func TestGithubWebhookStaleWriterCannotAdmitOrClaim(t *testing.T) {
 
 func TestGithubWebhookWriterBelowProtocolFloorIsFenced(t *testing.T) {
 	database := newGithubWebhookDeliveryTestDatabase(t)
-	require.NoError(t, database.GormDB.Model(&ControlPlaneFence{}).Where("id = ?", ControlPlaneFenceSingletonID).Update("protocol_floor", 2).Error)
+	require.NoError(t, database.GormDB.Model(&ControlPlaneFence{}).Where("id = ?", ControlPlaneFenceSingletonID).Update("protocol_floor", operation.ProtocolVersion+1).Error)
 	delivery := testGithubWebhookDelivery("delivery-old-protocol", "payload")
 
 	_, _, err := database.RecordGithubWebhookDelivery(context.Background(), delivery, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
