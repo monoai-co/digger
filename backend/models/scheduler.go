@@ -42,7 +42,8 @@ type DiggerBatch struct {
 	ProtocolVersion          int       `gorm:"type:integer;not null;default:1"`
 	StatusVersion            int64     `gorm:"not null;default:0"`
 	WriterEpoch              *int64
-	DiggerBatchID            string `gorm:"size:20,index:idx_digger_batch_id"` // shorter version of the ID to be able to use in check run
+	Operation                *ControlOperation `gorm:"foreignKey:OperationID;references:OperationID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	DiggerBatchID            string            `gorm:"size:20,index:idx_digger_batch_id"` // shorter version of the ID to be able to use in check run
 	Layer                    uint
 	VCS                      DiggerVCSType
 	PrNumber                 int
@@ -75,6 +76,7 @@ type DiggerJob struct {
 	ProtocolVersion              int     `gorm:"type:integer;not null;default:1"`
 	StatusVersion                int64   `gorm:"not null;default:0"`
 	WriterEpoch                  *int64
+	Operation                    *ControlOperation                      `gorm:"foreignKey:OperationID;references:OperationID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	Status                       orchestrator_scheduler.DiggerJobStatus `gorm:"index:idx_digger_jobs_status"`
 	RunName                      string
 	ProjectName                  string
@@ -113,11 +115,19 @@ type DiggerJobSummary struct {
 // These tokens will be pre
 type JobToken struct {
 	gorm.Model
-	Value          string `gorm:"uniqueJobTokenIndex:idx_token"`
-	Expiry         time.Time
-	OrganisationID uint
-	Organisation   Organisation
-	Type           string // AccessTokenType starts with j:
+	Value               string `gorm:"uniqueJobTokenIndex:idx_token"`
+	Expiry              time.Time
+	OrganisationID      uint
+	Organisation        Organisation
+	DiggerJobDatabaseID *uint      `gorm:"uniqueIndex:idx_job_tokens_digger_job_database_id,where:digger_job_database_id IS NOT NULL"`
+	DiggerJob           *DiggerJob `gorm:"foreignKey:DiggerJobDatabaseID;references:ID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	Type                string     // AccessTokenType starts with j:
+}
+
+type JobCreationIdentity struct {
+	DeliveryOperationID string
+	WriterEpoch         int64
+	ProtocolVersion     int
 }
 
 type DiggerJobLinkStatus int8

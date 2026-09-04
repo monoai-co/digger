@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"hash"
+	"strconv"
 	"strings"
 )
 
@@ -53,6 +54,32 @@ func (id ID) Valid() bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, idPrefix))
 	return err == nil
+}
+
+func DeriveBatch(deliveryOperationID ID, command string, repository string, pullRequestNumber int, commitSHA string) (ID, error) {
+	if !deliveryOperationID.Valid() || strings.TrimSpace(command) == "" || strings.TrimSpace(repository) == "" || pullRequestNumber <= 0 || strings.TrimSpace(commitSHA) == "" {
+		return "", ErrInvalidComponent
+	}
+	return Derive(
+		"digger-batch",
+		"delivery:"+deliveryOperationID.String(),
+		"command:"+command,
+		"repository:"+repository,
+		"pull-request:"+strconv.Itoa(pullRequestNumber),
+		"commit:"+commitSHA,
+	)
+}
+
+func DeriveJob(batchOperationID ID, projectName string, workflowFile string) (ID, error) {
+	if !batchOperationID.Valid() || strings.TrimSpace(projectName) == "" || strings.TrimSpace(workflowFile) == "" {
+		return "", ErrInvalidComponent
+	}
+	return Derive(
+		"digger-job",
+		"batch:"+batchOperationID.String(),
+		"project:"+projectName,
+		"workflow:"+workflowFile,
+	)
 }
 
 func writeComponent(digest hash.Hash, component string) {

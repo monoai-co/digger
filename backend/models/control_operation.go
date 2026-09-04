@@ -18,7 +18,7 @@ type ControlOperation struct {
 	OperationID      string                 `gorm:"type:text;primaryKey"`
 	OperationKind    string                 `gorm:"type:text;not null"`
 	IdentitySHA256   string                 `gorm:"type:text;not null"`
-	GithubDeliveryID *string                `gorm:"column:delivery_id;type:text;uniqueIndex:idx_control_operations_delivery_id,where:delivery_id IS NOT NULL"`
+	GithubDeliveryID *string                `gorm:"column:delivery_id;type:text;index:idx_control_operations_delivery_lookup,where:delivery_id IS NOT NULL"`
 	Delivery         *GithubWebhookDelivery `gorm:"foreignKey:GithubDeliveryID;references:DeliveryID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	WriterEpoch      int64                  `gorm:"not null"`
 	ProtocolVersion  int                    `gorm:"type:integer;not null;default:1"`

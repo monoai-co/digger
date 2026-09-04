@@ -3,13 +3,45 @@ package models
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
+
+func TestDurableSchedulerRelationshipsBelongToReferencedRows(t *testing.T) {
+	testCases := []struct {
+		name             string
+		model            any
+		relationName     string
+		foreignKeyColumn string
+		referenceTable   string
+		referenceColumn  string
+	}{
+		{name: "batch operation", model: &DiggerBatch{}, relationName: "Operation", foreignKeyColumn: "operation_id", referenceTable: "control_operations", referenceColumn: "operation_id"},
+		{name: "job operation", model: &DiggerJob{}, relationName: "Operation", foreignKeyColumn: "operation_id", referenceTable: "control_operations", referenceColumn: "operation_id"},
+		{name: "job token", model: &JobToken{}, relationName: "DiggerJob", foreignKeyColumn: "digger_job_database_id", referenceTable: "digger_jobs", referenceColumn: "id"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			parsed, err := schema.Parse(testCase.model, &sync.Map{}, schema.NamingStrategy{})
+			require.NoError(t, err)
+			relation := parsed.Relationships.Relations[testCase.relationName]
+			require.NotNil(t, relation)
+			require.Equal(t, schema.BelongsTo, relation.Type)
+			require.Len(t, relation.References, 1)
+			require.Equal(t, testCase.foreignKeyColumn, relation.References[0].ForeignKey.DBName)
+			require.Equal(t, testCase.referenceTable, relation.References[0].PrimaryKey.Schema.Table)
+			require.Equal(t, testCase.referenceColumn, relation.References[0].PrimaryKey.DBName)
+		})
+	}
+}
 
 func setupSuiteScheduler(tb testing.TB) (func(tb testing.TB), *Database) {
 	// database file name
