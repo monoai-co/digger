@@ -135,7 +135,12 @@ func (db *Database) RecordGithubWebhookDelivery(ctx context.Context, delivery *G
 	var receipt *GithubWebhookDelivery
 	created := false
 	err := db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
-		now := time.Now().UTC()
+		now, err := databaseTransactionNow(tx, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		delivery.ReceivedAt = now
+		delivery.UpdatedAt = now
 		domain := GithubWebhookOrderingDomain{
 			OrderingDomain: delivery.OrderingDomain,
 			NextSequence:   1,
@@ -154,7 +159,7 @@ func (db *Database) RecordGithubWebhookDelivery(ctx context.Context, delivery *G
 		}
 
 		var existing GithubWebhookDelivery
-		err := tx.First(&existing, "delivery_id = ?", delivery.DeliveryID).Error
+		err = tx.First(&existing, "delivery_id = ?", delivery.DeliveryID).Error
 		if err == nil {
 			receipt = &existing
 			if !existing.HasSameRequestIdentity(delivery) {
@@ -214,6 +219,10 @@ func (db *Database) RecordGithubWebhookDelivery(ctx context.Context, delivery *G
 func (db *Database) ClaimNextGithubWebhookDelivery(ctx context.Context, now time.Time, leaseID string, leaseDuration time.Duration, databaseIdentity string, writerEpoch int64) (*GithubWebhookDelivery, error) {
 	var claimed *GithubWebhookDelivery
 	err := db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, true, func(database *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(database, now)
+		if err != nil {
+			return err
+		}
 		if database.Dialector.Name() == "postgres" {
 			var row GithubWebhookDelivery
 			result := database.Raw(`
@@ -238,9 +247,9 @@ WHERE delivery_id = (
     LIMIT 1
 )
 RETURNING *`,
-				now.Add(leaseDuration), leaseID, writerEpoch, GithubWebhookDeliveryProcessing, now,
-				GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying, now,
-				GithubWebhookDeliveryProcessing, now,
+				effectiveNow.Add(leaseDuration), leaseID, writerEpoch, GithubWebhookDeliveryProcessing, effectiveNow,
+				GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying, effectiveNow,
+				GithubWebhookDeliveryProcessing, effectiveNow,
 			).Scan(&row)
 			if result.Error != nil {
 				return result.Error
@@ -255,14 +264,14 @@ RETURNING *`,
 		// SQLite is used by focused unit tests. A transaction keeps this fallback
 		// deterministic; production PostgreSQL always uses the SKIP LOCKED statement.
 		var candidate GithubWebhookDelivery
-		err := database.
+		err = database.
 			Table("github_webhook_deliveries AS deliveries").
 			Select("deliveries.*").
 			Joins("JOIN github_webhook_ordering_domains AS domains ON domains.ordering_domain = deliveries.ordering_domain AND deliveries.ordering_sequence = domains.last_terminal_sequence + 1").
 			Where(
 				"((processing_status IN ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (processing_status = ? AND lease_expires_at <= ?)",
-				[]GithubWebhookDeliveryStatus{GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying}, now,
-				GithubWebhookDeliveryProcessing, now,
+				[]GithubWebhookDeliveryStatus{GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying}, effectiveNow,
+				GithubWebhookDeliveryProcessing, effectiveNow,
 			).
 			Order("received_at ASC, delivery_id ASC").
 			First(&candidate).Error
@@ -274,15 +283,15 @@ RETURNING *`,
 		}
 		result := database.Model(&GithubWebhookDelivery{}).
 			Where("delivery_id = ?", candidate.DeliveryID).
-			Where("processing_status IN ? OR (processing_status = ? AND lease_expires_at <= ?)", []GithubWebhookDeliveryStatus{GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying}, GithubWebhookDeliveryProcessing, now).
+			Where("processing_status IN ? OR (processing_status = ? AND lease_expires_at <= ?)", []GithubWebhookDeliveryStatus{GithubWebhookDeliveryPending, GithubWebhookDeliveryRetrying}, GithubWebhookDeliveryProcessing, effectiveNow).
 			Updates(map[string]any{
 				"attempt_count":     gorm.Expr("attempt_count + 1"),
 				"last_error":        "",
-				"lease_expires_at":  now.Add(leaseDuration),
+				"lease_expires_at":  effectiveNow.Add(leaseDuration),
 				"lease_id":          leaseID,
 				"writer_epoch":      writerEpoch,
 				"processing_status": GithubWebhookDeliveryProcessing,
-				"updated_at":        now,
+				"updated_at":        effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -301,11 +310,15 @@ RETURNING *`,
 
 func (db *Database) RenewGithubWebhookDeliveryLease(ctx context.Context, deliveryID string, leaseID string, now time.Time, leaseDuration time.Duration, databaseIdentity string, writerEpoch int64) error {
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(tx, now)
+		if err != nil {
+			return err
+		}
 		result := tx.Model(&GithubWebhookDelivery{}).
 			Where("delivery_id = ? AND processing_status = ? AND lease_id = ? AND writer_epoch = ?", deliveryID, GithubWebhookDeliveryProcessing, leaseID, writerEpoch).
 			Updates(map[string]any{
-				"lease_expires_at": now.Add(leaseDuration),
-				"updated_at":       now,
+				"lease_expires_at": effectiveNow.Add(leaseDuration),
+				"updated_at":       effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -322,6 +335,10 @@ func (db *Database) CompleteGithubWebhookDelivery(ctx context.Context, deliveryI
 		return fmt.Errorf("invalid terminal webhook status %q", status)
 	}
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(tx, now)
+		if err != nil {
+			return err
+		}
 		var delivery GithubWebhookDelivery
 		if err := tx.First(&delivery, "delivery_id = ? AND processing_status = ? AND lease_id = ? AND writer_epoch = ?", deliveryID, GithubWebhookDeliveryProcessing, leaseID, writerEpoch).Error; err != nil {
 			return err
@@ -333,10 +350,10 @@ func (db *Database) CompleteGithubWebhookDelivery(ctx context.Context, deliveryI
 				"lease_expires_at":  nil,
 				"lease_id":          "",
 				"next_attempt_at":   nil,
-				"processed_at":      now,
+				"processed_at":      effectiveNow,
 				"processing_status": status,
 				"terminal_result":   terminalResult,
-				"updated_at":        now,
+				"updated_at":        effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -346,7 +363,7 @@ func (db *Database) CompleteGithubWebhookDelivery(ctx context.Context, deliveryI
 		}
 		domainResult := tx.Model(&GithubWebhookOrderingDomain{}).
 			Where("ordering_domain = ? AND last_terminal_sequence = ?", delivery.OrderingDomain, delivery.OrderingSequence-1).
-			Updates(map[string]any{"last_terminal_sequence": delivery.OrderingSequence, "updated_at": now})
+			Updates(map[string]any{"last_terminal_sequence": delivery.OrderingSequence, "updated_at": effectiveNow})
 		if domainResult.Error != nil {
 			return domainResult.Error
 		}
@@ -355,7 +372,7 @@ func (db *Database) CompleteGithubWebhookDelivery(ctx context.Context, deliveryI
 		}
 		operationResult := tx.Model(&ControlOperation{}).
 			Where("operation_id = ? AND status = ?", delivery.OperationID, ControlOperationPending).
-			Updates(map[string]any{"status": ControlOperationCompleted, "updated_at": now})
+			Updates(map[string]any{"status": ControlOperationCompleted, "updated_at": effectiveNow})
 		if operationResult.Error != nil {
 			return operationResult.Error
 		}
@@ -368,15 +385,20 @@ func (db *Database) CompleteGithubWebhookDelivery(ctx context.Context, deliveryI
 
 func (db *Database) RetryGithubWebhookDelivery(ctx context.Context, deliveryID string, leaseID string, lastError string, nextAttemptAt time.Time, now time.Time, databaseIdentity string, writerEpoch int64) error {
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(tx, now)
+		if err != nil {
+			return err
+		}
+		retryDelay := nextAttemptAt.Sub(now)
 		result := tx.Model(&GithubWebhookDelivery{}).
 			Where("delivery_id = ? AND processing_status = ? AND lease_id = ? AND writer_epoch = ?", deliveryID, GithubWebhookDeliveryProcessing, leaseID, writerEpoch).
 			Updates(map[string]any{
 				"last_error":        lastError,
 				"lease_expires_at":  nil,
 				"lease_id":          "",
-				"next_attempt_at":   nextAttemptAt,
+				"next_attempt_at":   effectiveNow.Add(retryDelay),
 				"processing_status": GithubWebhookDeliveryRetrying,
-				"updated_at":        now,
+				"updated_at":        effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -390,17 +412,21 @@ func (db *Database) RetryGithubWebhookDelivery(ctx context.Context, deliveryID s
 
 func (db *Database) DeadLetterGithubWebhookDelivery(ctx context.Context, deliveryID string, leaseID string, lastError string, now time.Time, databaseIdentity string, writerEpoch int64) error {
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(tx, now)
+		if err != nil {
+			return err
+		}
 		result := tx.Model(&GithubWebhookDelivery{}).
 			Where("delivery_id = ? AND processing_status = ? AND lease_id = ? AND writer_epoch = ?", deliveryID, GithubWebhookDeliveryProcessing, leaseID, writerEpoch).
 			Updates(map[string]any{
-				"dead_lettered_at":  now,
+				"dead_lettered_at":  effectiveNow,
 				"last_error":        lastError,
 				"lease_expires_at":  nil,
 				"lease_id":          "",
 				"next_attempt_at":   nil,
 				"processing_status": GithubWebhookDeliveryDeadLetter,
 				"terminal_result":   "failed",
-				"updated_at":        now,
+				"updated_at":        effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -422,6 +448,10 @@ func (db *Database) CheckGithubWebhookInbox(ctx context.Context) error {
 
 func (db *Database) RequeueGithubWebhookDelivery(ctx context.Context, deliveryID string, actor string, reason string, now time.Time, databaseIdentity string, writerEpoch int64) error {
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		effectiveNow, err := databaseTransactionNow(tx, now)
+		if err != nil {
+			return err
+		}
 		result := tx.Model(&GithubWebhookDelivery{}).
 			Where("delivery_id = ? AND processing_status = ?", deliveryID, GithubWebhookDeliveryDeadLetter).
 			Updates(map[string]any{
@@ -430,11 +460,11 @@ func (db *Database) RequeueGithubWebhookDelivery(ctx context.Context, deliveryID
 				"last_error":        "",
 				"lease_expires_at":  nil,
 				"lease_id":          "",
-				"next_attempt_at":   now,
+				"next_attempt_at":   effectiveNow,
 				"processed_at":      nil,
 				"processing_status": GithubWebhookDeliveryPending,
 				"terminal_result":   "",
-				"updated_at":        now,
+				"updated_at":        effectiveNow,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -447,7 +477,7 @@ func (db *Database) RequeueGithubWebhookDelivery(ctx context.Context, deliveryID
 			GithubWebhookDeliveryID: deliveryID,
 			Actor:                   actor,
 			Reason:                  reason,
-			RequeuedAt:              now,
+			RequeuedAt:              effectiveNow,
 		}).Error
 	})
 }
