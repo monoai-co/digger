@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -229,6 +230,7 @@ func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.D
 		"status":           models.OutboxEffectSucceeded,
 		"lease_id":         "",
 		"lease_expires_at": nil,
+		"provider_receipt": durableGraphDispatchReceipt(t, *job.OperationID, runID, strings.Repeat("a", 40)),
 		"updated_at":       time.Now().UTC(),
 	}).Error)
 	var token models.JobToken
@@ -247,6 +249,21 @@ func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.D
 		ProtocolVersion:     operation.ProtocolVersion,
 		DispatchWriterEpoch: durableGraphTestWriterEpoch,
 	}, token.Value
+}
+
+func durableGraphDispatchReceipt(t *testing.T, operationID string, runID int64, headSHA string) []byte {
+	t.Helper()
+	receipt, err := json.Marshal(map[string]any{
+		"accepted":     true,
+		"operation_id": operationID,
+		"control_ref":  "main",
+		"run_id":       runID,
+		"run_attempt":  1,
+		"run_url":      fmt.Sprintf("https://github.com/monoai-co/sre/actions/runs/%d", runID),
+		"head_sha":     headSHA,
+	})
+	require.NoError(t, err)
+	return receipt
 }
 
 func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
@@ -278,13 +295,12 @@ func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
 	changed := request
 	changed.WorkflowRef += "-tampered"
 	_, err = database.ClaimDurableJobExecution(context.Background(), changed, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
-	require.ErrorIs(t, err, models.ErrDurableJobDispatchConflict)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 
 	competitor := request
 	competitor.RunID++
-	rejected, err := database.ClaimDurableJobExecution(context.Background(), competitor, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
-	require.NoError(t, err)
-	require.False(t, rejected.Granted)
+	_, err = database.ClaimDurableJobExecution(context.Background(), competitor, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 
 	for _, invalidToken := range []string{"cli:wrong", ""} {
 		_, err = database.ClaimDurableJobExecution(context.Background(), request, invalidToken, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
@@ -296,9 +312,8 @@ func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
 	require.Equal(t, int64(2), storedJob.StatusVersion)
 	var attempts []models.ExecutionClaimAttempt
 	require.NoError(t, database.GormDB.Order("run_id").Find(&attempts).Error)
-	require.Len(t, attempts, 2)
+	require.Len(t, attempts, 1)
 	require.Equal(t, models.ExecutionClaimGranted, attempts[0].State)
-	require.Equal(t, models.ExecutionClaimRejected, attempts[1].State)
 	for _, attempt := range attempts {
 		require.Equal(t, job.DiggerJobID, attempt.DiggerJobID)
 		require.Equal(t, job.ID, attempt.DiggerJobDatabaseID)
@@ -307,7 +322,6 @@ func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
 		require.Equal(t, receipt.GrantExpiresAt, attempt.GrantExpiresAt)
 	}
 	require.Len(t, attempts[0].GrantTokenSHA256, sha256.Size*2)
-	require.Empty(t, attempts[1].GrantTokenSHA256)
 	var storedToken models.JobToken
 	require.NoError(t, database.GormDB.First(&storedToken, "digger_job_database_id = ?", job.ID).Error)
 	require.Equal(t, storedToken.ID, attempts[0].JobTokenID)
@@ -341,20 +355,22 @@ func TestPostgresClaimDurableJobExecutionGrantsOnlyOneRun(t *testing.T) {
 	workers.Wait()
 	close(receipts)
 	close(errorsByWorker)
+	rejected := 0
 	for err := range errorsByWorker {
-		require.NoError(t, err)
+		require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+		rejected++
 	}
 	granted := 0
-	rejected := 0
 	for receipt := range receipts {
 		if receipt.Granted {
 			granted++
-		} else {
-			rejected++
 		}
 	}
 	require.Equal(t, 1, granted)
 	require.Equal(t, contenders-1, rejected)
+	var attempts int64
+	require.NoError(t, database.GormDB.Model(&models.ExecutionClaimAttempt{}).Count(&attempts).Error)
+	require.Equal(t, int64(1), attempts)
 }
 
 func TestPostgresExecutionClaimAttemptRejectsMixedBindings(t *testing.T) {
@@ -462,7 +478,7 @@ func TestPostgresRecoveredDispatchCanClaimThroughNewWriterEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, preparation.Job.WriterEpoch)
 	require.Equal(t, durableGraphTestWriterEpoch, *preparation.Job.WriterEpoch)
-	require.NoError(t, database.CompleteOutboxEffect(context.Background(), claimedEffect.ID, claimedEffect.LeaseID, []byte(`{"accepted":true}`), time.Now().UTC(), durableGraphTestDatabaseIdentity, targetEpoch))
+	require.NoError(t, database.CompleteOutboxEffect(context.Background(), claimedEffect.ID, claimedEffect.LeaseID, durableGraphDispatchReceipt(t, *job.OperationID, 2001, strings.Repeat("c", 40)), time.Now().UTC(), durableGraphTestDatabaseIdentity, targetEpoch))
 
 	var token models.JobToken
 	require.NoError(t, database.GormDB.First(&token, "digger_job_database_id = ?", job.ID).Error)

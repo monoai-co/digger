@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/diggerhq/digger/backend/ci_backends"
 	"github.com/diggerhq/digger/backend/models"
 	backendutils "github.com/diggerhq/digger/backend/utils"
 	configuration "github.com/diggerhq/digger/libs/digger_config"
@@ -61,22 +62,39 @@ func (provider blockingGithubWorkflowDispatchProvider) FetchCredentials(string) 
 	return "", "", "", "", nil
 }
 
-func githubWorkflowDispatchTestProvider(t *testing.T, dispatches *int, capturedSpec *spec.Spec) backendutils.DiggerGithubClientMockProvider {
+func githubWorkflowDispatchTestProvider(t *testing.T, dispatches *int, capturedSpec *spec.Spec, capturedRunName *string) backendutils.DiggerGithubClientMockProvider {
 	t.Helper()
 	return backendutils.DiggerGithubClientMockProvider{MockedHTTPClient: &http.Client{Transport: githubWorkflowDispatchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre":
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"default_branch":"main"}`)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/runs/901":
+			body, err := json.Marshal(github.WorkflowRun{
+				ID:           github.Int64(901),
+				RunAttempt:   github.Int(1),
+				DisplayTitle: capturedRunName,
+				Event:        github.String("workflow_dispatch"),
+				HeadBranch:   github.String("main"),
+				HeadSHA:      github.String("0123456789012345678901234567890123456789"),
+				HTMLURL:      github.String("https://github.com/monoai-co/sre/actions/runs/901"),
+			})
+			require.NoError(t, err)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml/dispatches":
 			(*dispatches)++
 			var body struct {
 				Inputs map[string]any `json:"inputs"`
 			}
 			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+			runName, ok := body.Inputs["run_name"].(string)
+			require.True(t, ok)
+			*capturedRunName = runName
 			rawSpec, ok := body.Inputs["spec"].(string)
 			require.True(t, ok)
 			require.NoError(t, json.Unmarshal([]byte(rawSpec), capturedSpec))
-			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+			require.Equal(t, "2026-03-10", request.Header.Get("X-GitHub-Api-Version"))
+			details := `{"workflow_run_id":901,"run_url":"https://api.github.com/repos/monoai-co/sre/actions/runs/901","html_url":"https://github.com/monoai-co/sre/actions/runs/901"}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(details)), Header: make(http.Header)}, nil
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", request.Method, request.URL.Path)
 			return nil, nil
@@ -146,7 +164,8 @@ func TestGithubWorkflowOutboxDispatchPreparesTokenBeforeProvider(t *testing.T) {
 	store := &githubWorkflowDispatchTestStore{preparation: preparation}
 	dispatches := 0
 	var capturedSpec spec.Spec
-	provider := githubWorkflowDispatchTestProvider(t, &dispatches, &capturedSpec)
+	var capturedRunName string
+	provider := githubWorkflowDispatchTestProvider(t, &dispatches, &capturedSpec, &capturedRunName)
 	dispatch, err := NewGithubWorkflowOutboxDispatch(store, provider, DefaultDurableJobTokenValidity)
 	require.NoError(t, err)
 	effectID := uuid.New()
@@ -175,6 +194,66 @@ func TestGithubWorkflowOutboxDispatchPreparesTokenBeforeProvider(t *testing.T) {
 	require.Equal(t, operation.ProtocolVersion, capturedSpec.ProtocolVersion)
 	require.Equal(t, int64(7), capturedSpec.WriterEpoch)
 	require.Equal(t, "monoai-co/sre", capturedSpec.VCS.RepoFullname)
+	require.Contains(t, capturedRunName, "[digger-operation:"+request.OperationID+"]")
+	var receipt struct {
+		RunID      int64  `json:"run_id"`
+		RunAttempt int    `json:"run_attempt"`
+		ControlRef string `json:"control_ref"`
+	}
+	require.NoError(t, json.Unmarshal(result.ProviderReceipt, &receipt))
+	require.Equal(t, int64(901), receipt.RunID)
+	require.Equal(t, 1, receipt.RunAttempt)
+	require.Equal(t, "main", receipt.ControlRef)
+}
+
+func TestGithubWorkflowOutboxDispatchRetriesAmbiguousAcceptAndCommitsReturnedRun(t *testing.T) {
+	preparation := githubWorkflowDispatchTestPreparation(t)
+	store := &githubWorkflowDispatchTestStore{preparation: preparation}
+	dispatches := 0
+	var runName string
+	provider := backendutils.DiggerGithubClientMockProvider{MockedHTTPClient: &http.Client{Transport: githubWorkflowDispatchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"default_branch":"main"}`)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/monoai-co/sre/actions/workflows/digger_workflow.yml/dispatches":
+			dispatches++
+			var body struct {
+				Inputs map[string]any `json:"inputs"`
+			}
+			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+			var ok bool
+			runName, ok = body.Inputs["run_name"].(string)
+			require.True(t, ok)
+			if dispatches == 1 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			details := `{"workflow_run_id":902,"run_url":"https://api.github.com/repos/monoai-co/sre/actions/runs/902","html_url":"https://github.com/monoai-co/sre/actions/runs/902"}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(details)), Header: make(http.Header)}, nil
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/monoai-co/sre/actions/runs/902":
+			run := github.WorkflowRun{ID: github.Int64(902), RunAttempt: github.Int(1), DisplayTitle: &runName, Event: github.String("workflow_dispatch"), HeadBranch: github.String("main"), HeadSHA: github.String(strings.Repeat("a", 40)), HTMLURL: github.String("https://github.com/monoai-co/sre/actions/runs/902")}
+			body, err := json.Marshal(run)
+			require.NoError(t, err)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", request.Method, request.URL.Path)
+			return nil, nil
+		}
+	})}}
+	dispatch, err := NewGithubWorkflowOutboxDispatch(store, provider, DefaultDurableJobTokenValidity)
+	require.NoError(t, err)
+	request := OutboxDispatchRequest{EffectID: uuid.New(), OperationID: *preparation.Job.OperationID, EffectKind: models.GithubWorkflowDispatchEffectKind, LeaseID: "lease", DatabaseIdentity: "database", WriterEpoch: 7, LeaseDuration: time.Minute}
+
+	_, err = dispatch(context.Background(), request)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ci_backends.ErrWorkflowDispatchAcceptanceAmbiguous))
+	result, err := dispatch(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, 2, dispatches)
+	var receipt struct {
+		RunID int64 `json:"run_id"`
+	}
+	require.NoError(t, json.Unmarshal(result.ProviderReceipt, &receipt))
+	require.Equal(t, int64(902), receipt.RunID)
 }
 
 func TestGithubWorkflowOutboxDispatchNeverCallsProviderWhenPreparationFailsOrSkips(t *testing.T) {
@@ -192,7 +271,8 @@ func TestGithubWorkflowOutboxDispatchNeverCallsProviderWhenPreparationFailsOrSki
 			store := &githubWorkflowDispatchTestStore{preparation: preparation, err: testCase.prepareErr}
 			dispatches := 0
 			var capturedSpec spec.Spec
-			provider := githubWorkflowDispatchTestProvider(t, &dispatches, &capturedSpec)
+			var capturedRunName string
+			provider := githubWorkflowDispatchTestProvider(t, &dispatches, &capturedSpec, &capturedRunName)
 			dispatch, err := NewGithubWorkflowOutboxDispatch(store, provider, DefaultDurableJobTokenValidity)
 			require.NoError(t, err)
 			result, err := dispatch(context.Background(), OutboxDispatchRequest{

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -622,6 +623,12 @@ func (db *Database) ClaimDurableJobExecution(
 			}
 			return ErrDurableJobDispatchClaim
 		}
+		dispatchReceipt, err := decodeDurableWorkflowDispatchReceipt(effect.ProviderReceipt)
+		if err != nil || dispatchReceipt.OperationID != request.OperationID || !dispatchReceipt.Accepted || dispatchReceipt.TerminalNoop ||
+			dispatchReceipt.RunID != request.RunID || dispatchReceipt.RunAttempt != 1 || dispatchReceipt.ControlRef == "" ||
+			dispatchReceipt.HeadSHA != request.WorkflowSHA {
+			return ErrDurableJobDispatchClaim
+		}
 		state, err := loadDurableWorkflowDispatchStateTx(tx, &effect)
 		if err != nil {
 			return err
@@ -631,6 +638,10 @@ func (db *Database) ClaimDurableJobExecution(
 			state.Job.WriterEpoch == nil || *state.Job.WriterEpoch != request.DispatchWriterEpoch ||
 			state.JobOperation.Status != ControlOperationPending || state.Token.ActivatedAt == nil || state.Token.RevokedAt != nil ||
 			!state.Token.Expiry.After(now) || !hmac.Equal([]byte(state.Token.Value), []byte(jobTokenValue)) {
+			return ErrDurableJobDispatchClaim
+		}
+		expectedWorkflowRef := fmt.Sprintf("%s/.github/workflows/%s@refs/heads/%s", state.Batch.RepoFullName, strings.TrimPrefix(state.Job.WorkflowFile, ".github/workflows/"), dispatchReceipt.ControlRef)
+		if request.WorkflowRef != expectedWorkflowRef {
 			return ErrDurableJobDispatchClaim
 		}
 		if state.Job.Status != scheduler.DiggerJobTriggered && state.Job.Status != scheduler.DiggerJobStarted {
@@ -708,6 +719,38 @@ func (db *Database) ClaimDurableJobExecution(
 		return nil
 	})
 	return receipt, err
+}
+
+type durableWorkflowDispatchProviderReceipt struct {
+	Accepted     bool   `json:"accepted"`
+	OperationID  string `json:"operation_id"`
+	TerminalNoop bool   `json:"terminal_noop"`
+	ControlRef   string `json:"control_ref"`
+	RunID        int64  `json:"run_id"`
+	RunAttempt   int    `json:"run_attempt"`
+	RunURL       string `json:"run_url"`
+	HeadSHA      string `json:"head_sha"`
+}
+
+func decodeDurableWorkflowDispatchReceipt(payload []byte) (*durableWorkflowDispatchProviderReceipt, error) {
+	if len(payload) == 0 {
+		return nil, ErrDurableJobDispatchClaim
+	}
+	var receipt durableWorkflowDispatchProviderReceipt
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&receipt); err != nil {
+		return nil, fmt.Errorf("decode durable workflow dispatch receipt: %w", err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("decode durable workflow dispatch receipt: trailing JSON")
+	}
+	if !operation.ID(receipt.OperationID).Valid() || receipt.RunID <= 0 || receipt.RunAttempt != 1 ||
+		strings.TrimSpace(receipt.ControlRef) == "" || strings.TrimSpace(receipt.ControlRef) != receipt.ControlRef ||
+		!validLowerHexDigest(receipt.HeadSHA, 40) || strings.TrimSpace(receipt.RunURL) == "" {
+		return nil, ErrDurableJobDispatchClaim
+	}
+	return &receipt, nil
 }
 
 func validDurableExecutionClaimRequest(request DurableExecutionClaimRequest) bool {

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/diggerhq/digger/backend/ci_backends"
 	"github.com/diggerhq/digger/backend/models"
 	"github.com/diggerhq/digger/backend/services"
 	"github.com/diggerhq/digger/backend/utils"
+	"github.com/google/go-github/v61/github"
 	"github.com/google/uuid"
 )
 
@@ -55,12 +57,11 @@ func NewGithubWorkflowOutboxDispatch(
 		if preparation.Job.OperationID == nil || preparation.Job.WriterEpoch == nil || request.OperationID != *preparation.Job.OperationID {
 			return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
 		}
-		if preparation.SkipProvider {
-			return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, true)
-		}
-
 		job := preparation.Job
 		batch := job.Batch
+		if preparation.SkipProvider {
+			return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, true, "", nil)
+		}
 		client, _, err := githubClientProvider.GetContext(ctx, preparation.GithubAppID, batch.GithubInstallationId)
 		if err != nil {
 			return OutboxDispatchResult{}, fmt.Errorf("create GitHub workflow client: %w", err)
@@ -77,25 +78,66 @@ func NewGithubWorkflowOutboxDispatch(
 		if err != nil {
 			return OutboxDispatchResult{}, err
 		}
-		if err := backend.TriggerWorkflowContext(ctx, *workflowSpec, *runName, ""); err != nil {
+		durableRunName := durableWorkflowRunName(*runName, *preparation.Job.OperationID)
+		controlRef, err := backend.ResolveControlRef(ctx, workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName)
+		if err != nil {
 			return OutboxDispatchResult{}, err
 		}
-		return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, false)
+		details, err := backend.TriggerWorkflowContextAtRefWithRunDetails(ctx, *workflowSpec, durableRunName, "", controlRef)
+		if err != nil {
+			return OutboxDispatchResult{}, err
+		}
+		run, _, err := client.Actions.GetWorkflowRunByID(ctx, workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName, details.RunID)
+		if err != nil {
+			return OutboxDispatchResult{}, fmt.Errorf("%w: load dispatched workflow run: %v", ci_backends.ErrWorkflowDispatchAcceptanceAmbiguous, err)
+		}
+		if run.GetHTMLURL() == "" {
+			run.HTMLURL = &details.HTMLURL
+		}
+		if !sameDurableWorkflowRun(run, durableRunName, controlRef) {
+			return OutboxDispatchResult{}, fmt.Errorf("%w: returned workflow run does not match dispatch", ci_backends.ErrWorkflowDispatchAcceptanceAmbiguous)
+		}
+		return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, false, controlRef, run)
 	}, nil
 }
 
-func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool) (OutboxDispatchResult, error) {
-	receipt, err := json.Marshal(struct {
+func durableWorkflowRunName(runName string, operationID string) string {
+	return fmt.Sprintf("%s [digger-operation:%s]", strings.TrimSpace(runName), operationID)
+}
+
+func sameDurableWorkflowRun(run *github.WorkflowRun, runName string, controlRef string) bool {
+	return run != nil && run.GetID() > 0 && run.GetRunAttempt() == 1 && run.GetDisplayTitle() == runName &&
+		run.GetEvent() == "workflow_dispatch" && run.GetHeadBranch() == controlRef && run.GetHeadSHA() != ""
+}
+
+func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, controlRef string, run *github.WorkflowRun) (OutboxDispatchResult, error) {
+	if !terminalNoop && (run == nil || run.GetID() <= 0 || controlRef == "") {
+		return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
+	}
+	receipt := struct {
 		Accepted     bool   `json:"accepted"`
 		OperationID  string `json:"operation_id"`
 		TerminalNoop bool   `json:"terminal_noop,omitempty"`
+		ControlRef   string `json:"control_ref,omitempty"`
+		RunID        int64  `json:"run_id,omitempty"`
+		RunAttempt   int    `json:"run_attempt,omitempty"`
+		RunURL       string `json:"run_url,omitempty"`
+		HeadSHA      string `json:"head_sha,omitempty"`
 	}{
 		Accepted:     !terminalNoop,
 		OperationID:  operationID,
 		TerminalNoop: terminalNoop,
-	})
+		ControlRef:   controlRef,
+	}
+	if run != nil {
+		receipt.RunID = run.GetID()
+		receipt.RunAttempt = run.GetRunAttempt()
+		receipt.RunURL = run.GetHTMLURL()
+		receipt.HeadSHA = run.GetHeadSHA()
+	}
+	serializedReceipt, err := json.Marshal(receipt)
 	if err != nil {
 		return OutboxDispatchResult{}, err
 	}
-	return OutboxDispatchResult{ProviderReceipt: receipt}, nil
+	return OutboxDispatchResult{ProviderReceipt: serializedReceipt}, nil
 }
