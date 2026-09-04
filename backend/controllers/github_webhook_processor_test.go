@@ -89,7 +89,7 @@ func newGithubWebhookProcessorTestDatabase(t *testing.T) *models.Database {
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(4)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
-	require.NoError(t, gormDB.AutoMigrate(&models.ControlPlaneFence{}, &models.GithubWebhookOrderingDomain{}, &models.GithubWebhookDelivery{}, &models.GithubWebhookDeliveryRequeue{}, &models.ControlOperation{}))
+	require.NoError(t, gormDB.AutoMigrate(&models.ControlPlaneFence{}, &models.GithubWebhookOrderingDomain{}, &models.GithubWebhookDelivery{}, &models.GithubWebhookDeliveryRequeue{}, &models.ControlOperation{}, &models.OutboxEffect{}))
 	require.NoError(t, gormDB.Create(&models.ControlPlaneFence{ID: models.ControlPlaneFenceSingletonID, DatabaseIdentity: githubWebhookTestDatabaseIdentity, WriterEpoch: githubWebhookTestWriterEpoch, Mode: models.ControlPlaneModeNormal, ProtocolFloor: 1, UpdatedAt: time.Now().UTC()}).Error)
 	return &models.Database{GormDB: gormDB}
 }

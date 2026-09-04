@@ -458,8 +458,5 @@ func (p *GithubWebhookProcessor) retryDelay(attempt int64) time.Duration {
 
 func truncateWebhookError(message string) string {
 	const maxWebhookErrorLength = 16 * 1024
-	if len(message) <= maxWebhookErrorLength {
-		return message
-	}
-	return message[:maxWebhookErrorLength]
+	return truncateValidUTF8(message, maxWebhookErrorLength)
 }
