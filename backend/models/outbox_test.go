@@ -192,6 +192,31 @@ func TestPostgresOutboxEffectDuplicateJSONBEnqueueIsIdempotent(t *testing.T) {
 	require.WithinDuration(t, deliveryReceipt.ReceivedAt, deliveryReceipt.UpdatedAt, time.Millisecond)
 }
 
+func TestPostgresGithubWorkflowOutboxPayloadCanonicalizesAndDetectsTampering(t *testing.T) {
+	database := newPostgresOutboxTestDatabase(t)
+	const operationID = "operation-postgres-workflow-payload"
+	createOutboxTestOperation(t, database, operationID)
+	reversedPayload := []byte(`{ "digger_job_id" : "job-1", "operation_id" : "operation-postgres-workflow-payload" }`)
+	effect := NewOutboxEffect(operationID, GithubWorkflowDispatchEffectKind, "job:"+operationID, reversedPayload, testControlPlaneWriterEpoch, time.Now().UTC())
+	receipt, created, err := database.EnqueueOutboxEffect(context.Background(), effect, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, `{"operation_id":"operation-postgres-workflow-payload","digger_job_id":"job-1"}`, string(receipt.Payload))
+
+	canonicalPayload := []byte(`{"operation_id":"operation-postgres-workflow-payload","digger_job_id":"job-1"}`)
+	duplicate := NewOutboxEffect(operationID, GithubWorkflowDispatchEffectKind, "job:"+operationID, canonicalPayload, testControlPlaneWriterEpoch, time.Now().UTC())
+	duplicateReceipt, created, err := database.EnqueueOutboxEffect(context.Background(), duplicate, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
+	require.NoError(t, err)
+	require.False(t, created)
+	require.Equal(t, receipt.ID, duplicateReceipt.ID)
+	require.True(t, duplicateReceipt.ValidPayloadDigest())
+
+	require.NoError(t, database.GormDB.Model(&OutboxEffect{}).Where("id = ?", receipt.ID).Update("payload", []byte(`{"operation_id":"tampered","digger_job_id":"job-1"}`)).Error)
+	var tampered OutboxEffect
+	require.NoError(t, database.GormDB.First(&tampered, "id = ?", receipt.ID).Error)
+	require.False(t, tampered.ValidPayloadDigest())
+}
+
 func TestPostgresDatabaseTransactionNowAdvancesWithinTransaction(t *testing.T) {
 	database := newPostgresOutboxTestDatabase(t)
 	tx := database.GormDB.Begin()

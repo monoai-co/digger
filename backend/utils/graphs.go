@@ -1,17 +1,100 @@
 package utils
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+	"time"
 
+	"github.com/dchest/uniuri"
 	"github.com/diggerhq/digger/backend/models"
 	configuration "github.com/diggerhq/digger/libs/digger_config"
+	"github.com/diggerhq/digger/libs/operation"
 	"github.com/diggerhq/digger/libs/scheduler"
 	"github.com/dominikbraun/graph"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+var ErrDurableJobGraphConflict = errors.New("durable job graph already exists with different state")
+var ErrDurableJobGraphClaim = errors.New("durable job graph delivery claim is not owned by this writer")
+var ErrDurableJobGraphTenant = errors.New("durable job graph tenant does not match the claimed delivery")
+
+type DurableJobGraphRequest struct {
+	Identity                 models.JobCreationIdentity
+	JobType                  scheduler.DiggerCommand
+	JobReporterType          string
+	OrganisationID           uint
+	Jobs                     map[string]scheduler.Job
+	Projects                 map[string]configuration.Project
+	ProjectsGraph            graph.Graph[string, configuration.Project]
+	GithubInstallationID     int64
+	Branch                   string
+	PullRequestNumber        int
+	RepoOwner                string
+	RepoName                 string
+	RepoFullName             string
+	CommitSHA                string
+	CommentID                *int64
+	DiggerConfig             string
+	AISummaryCommentID       string
+	ReportTerraformOutput    bool
+	CoverAllImpactedProjects bool
+	VCSConnectionID          *uint
+	BatchCheckRunData        *CheckRunData
+	JobCheckRunDataByProject map[string]CheckRunData
+}
+
+type durablePreparedJob struct {
+	projectName            string
+	operationID            operation.ID
+	serializedSpec         []byte
+	intentSpec             []byte
+	dependencyOperationIDs []byte
+	tokenValue             string
+	workflowFile           string
+	checkRunID             *string
+	checkRunURL            *string
+}
+
+type durableGraphIntent struct {
+	ProtocolVersion          int                     `json:"protocol_version"`
+	JobType                  scheduler.DiggerCommand `json:"job_type"`
+	JobReporterType          string                  `json:"job_reporter_type"`
+	OrganisationID           uint                    `json:"organisation_id"`
+	GithubInstallationID     int64                   `json:"github_installation_id"`
+	Branch                   string                  `json:"branch"`
+	PullRequestNumber        int                     `json:"pull_request_number"`
+	RepoOwner                string                  `json:"repo_owner"`
+	RepoName                 string                  `json:"repo_name"`
+	RepoFullName             string                  `json:"repo_full_name"`
+	CommitSHA                string                  `json:"commit_sha"`
+	CommentID                *int64                  `json:"comment_id"`
+	DiggerConfig             string                  `json:"digger_config"`
+	AISummaryCommentID       string                  `json:"ai_summary_comment_id"`
+	ReportTerraformOutput    bool                    `json:"report_terraform_output"`
+	CoverAllImpactedProjects bool                    `json:"cover_all_impacted_projects"`
+	VCSConnectionID          *uint                   `json:"vcs_connection_id"`
+	BatchCheckRunData        *CheckRunData           `json:"batch_check_run_data"`
+	Jobs                     []durableJobIntent      `json:"jobs"`
+}
+
+type durableJobIntent struct {
+	ProjectName    string          `json:"project_name"`
+	OperationID    string          `json:"operation_id"`
+	SerializedSpec json.RawMessage `json:"serialized_spec"`
+	WorkflowFile   string          `json:"workflow_file"`
+	CheckRunID     *string         `json:"check_run_id"`
+	CheckRunURL    *string         `json:"check_run_url"`
+	Parents        []string        `json:"parents"`
+}
 
 // ConvertJobsToDiggerJobs jobs is map with project name as a key and a Job as a value
 func ConvertJobsToDiggerJobs(jobType scheduler.DiggerCommand, jobReporterType string, vcsType models.DiggerVCSType, organisationId uint, jobsMap map[string]scheduler.Job, projectMap map[string]configuration.Project, projectsGraph graph.Graph[string, configuration.Project], githubInstallationId int64, branch string, prNumber int, repoOwner string, repoName string, repoFullName string, commitSha string, commentId *int64, diggerConfigStr string, gitlabProjectId int, aiSummaryCommentId string, reportTerraformOutput bool, coverAllImpactedProjects bool, VCSConnectionId *uint, batchCheckRunData *CheckRunData, jobsCheckRunIdsMap map[string]CheckRunData) (*uuid.UUID, map[string]*models.DiggerJob, error) {
@@ -202,6 +285,621 @@ func ConvertJobsToDiggerJobs(jobType scheduler.DiggerCommand, jobReporterType st
 	return &batch.ID, result, nil
 }
 
+// ConvertJobsToDiggerJobsDurable persists one delivery's batch, jobs, tokens,
+// provider links, and dependency links in the same fenced transaction. A retry
+// returns the previously committed graph after validating its immutable shape.
+func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraphRequest) (*uuid.UUID, map[string]*models.DiggerJob, error) {
+	if strings.TrimSpace(request.Identity.DatabaseIdentity) == "" || request.Identity.WriterEpoch <= 0 {
+		return nil, nil, models.ErrControlPlaneUnconfigured
+	}
+	if strings.TrimSpace(request.Identity.DeliveryLeaseID) == "" {
+		return nil, nil, ErrDurableJobGraphClaim
+	}
+	if request.Identity.ProtocolVersion != operation.ProtocolVersion {
+		return nil, nil, fmt.Errorf("durable job graph protocol version %d does not match binary version %d", request.Identity.ProtocolVersion, operation.ProtocolVersion)
+	}
+	deliveryOperationID := operation.ID(request.Identity.DeliveryOperationID)
+	if !deliveryOperationID.Valid() {
+		return nil, nil, fmt.Errorf("invalid delivery operation identity")
+	}
+	if len(request.Jobs) == 0 {
+		return nil, nil, fmt.Errorf("durable job graph must contain at least one job")
+	}
+
+	impactedGraph, err := durableImpactedProjectsOnlyGraph(request.ProjectsGraph, request.Projects)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create impacted projects graph: %w", err)
+	}
+	projectOrder, err := graph.StableTopologicalSort(impactedGraph, func(first string, second string) bool {
+		return first < second
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("sort impacted projects graph: %w", err)
+	}
+	predecessorMap, err := impactedGraph.PredecessorMap()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get impacted project predecessors: %w", err)
+	}
+	if len(projectOrder) != len(request.Jobs) || len(request.Projects) != len(request.Jobs) {
+		return nil, nil, fmt.Errorf("durable job, project, and graph sets must match")
+	}
+
+	batchOperationID, err := operation.DeriveBatch(deliveryOperationID, string(request.JobType), request.RepoFullName, request.PullRequestNumber, request.CommitSHA)
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive batch operation identity: %w", err)
+	}
+	jobOperationIDs := make(map[string]operation.ID, len(projectOrder))
+	for _, projectName := range projectOrder {
+		job, jobExists := request.Jobs[projectName]
+		project, projectExists := request.Projects[projectName]
+		if !jobExists || !projectExists || job.ProjectName != projectName || project.Name != projectName ||
+			job.PullRequestNumber == nil || *job.PullRequestNumber != request.PullRequestNumber {
+			return nil, nil, fmt.Errorf("durable job and project identity mismatch for %q", projectName)
+		}
+		jobOperationID, deriveErr := operation.DeriveJob(batchOperationID, projectName, project.WorkflowFile)
+		if deriveErr != nil {
+			return nil, nil, fmt.Errorf("derive job operation identity for %q: %w", projectName, deriveErr)
+		}
+		jobOperationIDs[projectName] = jobOperationID
+	}
+
+	var batchID uuid.UUID
+	result := make(map[string]*models.DiggerJob, len(projectOrder))
+	err = models.DB.WithAuthoritativeWriteTx(ctx, request.Identity.DatabaseIdentity, request.Identity.WriterEpoch, true, func(tx *gorm.DB, _ *models.ControlPlaneFence) error {
+		var delivery models.GithubWebhookDelivery
+		deliveryQuery := tx
+		if tx.Dialector.Name() == "postgres" {
+			deliveryQuery = deliveryQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if queryErr := deliveryQuery.First(&delivery, "operation_id = ?", deliveryOperationID.String()).Error; queryErr != nil {
+			return fmt.Errorf("load durable webhook delivery: %w", queryErr)
+		}
+		now, timeErr := durableTransactionNow(tx)
+		if timeErr != nil {
+			return timeErr
+		}
+		if delivery.ProcessingStatus != models.GithubWebhookDeliveryProcessing || delivery.LeaseID != request.Identity.DeliveryLeaseID || delivery.WriterEpoch == nil || *delivery.WriterEpoch != request.Identity.WriterEpoch || delivery.LeaseExpiresAt == nil || !delivery.LeaseExpiresAt.After(now) {
+			return ErrDurableJobGraphClaim
+		}
+		if delivery.InstallationID == nil || *delivery.InstallationID <= 0 || strings.TrimSpace(delivery.RepositoryFullName) == "" ||
+			request.GithubInstallationID != *delivery.InstallationID || request.RepoFullName != delivery.RepositoryFullName ||
+			request.RepoOwner == "" || request.RepoName == "" || request.RepoOwner+"/"+request.RepoName != request.RepoFullName {
+			return ErrDurableJobGraphTenant
+		}
+
+		var installationLinks []models.GithubAppInstallationLink
+		installationLinkQuery := tx.Where(
+			"github_installation_id = ? AND status = ?",
+			*delivery.InstallationID,
+			models.GithubAppInstallationLinkActive,
+		)
+		if tx.Dialector.Name() == "postgres" {
+			installationLinkQuery = installationLinkQuery.Clauses(clause.Locking{Strength: "SHARE"})
+		}
+		if queryErr := installationLinkQuery.Find(&installationLinks).Error; queryErr != nil {
+			return fmt.Errorf("load durable GitHub installation tenant link: %w", queryErr)
+		}
+		if len(installationLinks) != 1 || installationLinks[0].OrganisationId != request.OrganisationID {
+			return ErrDurableJobGraphTenant
+		}
+		if request.VCSConnectionID != nil {
+			var connection models.VCSConnection
+			connectionQuery := tx
+			if tx.Dialector.Name() == "postgres" {
+				connectionQuery = connectionQuery.Clauses(clause.Locking{Strength: "SHARE"})
+			}
+			if queryErr := connectionQuery.First(&connection, "id = ?", *request.VCSConnectionID).Error; queryErr != nil {
+				if errors.Is(queryErr, gorm.ErrRecordNotFound) {
+					return ErrDurableJobGraphTenant
+				}
+				return fmt.Errorf("load durable GitHub app connection: %w", queryErr)
+			}
+			if connection.OrganisationID != request.OrganisationID || connection.GithubId != delivery.GithubAppID || connection.VCSType != models.DiggerVCSGithub {
+				return ErrDurableJobGraphTenant
+			}
+		}
+
+		var organisation models.Organisation
+		organisationQuery := tx
+		if tx.Dialector.Name() == "postgres" {
+			organisationQuery = organisationQuery.Clauses(clause.Locking{Strength: "SHARE"})
+		}
+		if queryErr := organisationQuery.First(&organisation, "id = ?", installationLinks[0].OrganisationId).Error; queryErr != nil {
+			return fmt.Errorf("load durable job organisation: %w", queryErr)
+		}
+		now, timeErr = durableTransactionNow(tx)
+		if timeErr != nil {
+			return timeErr
+		}
+		if delivery.LeaseExpiresAt == nil || !delivery.LeaseExpiresAt.After(now) {
+			return ErrDurableJobGraphClaim
+		}
+		preparedJobs, prepareErr := prepareDurableJobs(request, projectOrder, jobOperationIDs, predecessorMap, organisation.Name)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		graphIntentSHA256, intentErr := durableGraphIntentSHA256(request, preparedJobs, predecessorMap)
+		if intentErr != nil {
+			return intentErr
+		}
+
+		var existingBatchOperation models.ControlOperation
+		existingOperationErr := tx.First(&existingBatchOperation, "delivery_id = ? AND operation_kind = ?", delivery.DeliveryID, "digger_batch").Error
+		if existingOperationErr == nil {
+			if existingBatchOperation.OperationID != batchOperationID.String() || existingBatchOperation.IdentitySHA256 != graphIntentSHA256 ||
+				existingBatchOperation.GithubDeliveryID == nil || *existingBatchOperation.GithubDeliveryID != delivery.DeliveryID ||
+				existingBatchOperation.ProtocolVersion != request.Identity.ProtocolVersion {
+				return ErrDurableJobGraphConflict
+			}
+			var existingBatch models.DiggerBatch
+			if existingErr := tx.Unscoped().First(&existingBatch, "operation_id = ?", existingBatchOperation.OperationID).Error; existingErr != nil {
+				return fmt.Errorf("load existing durable batch: %w", existingErr)
+			}
+			existingJobs, loadErr := loadExistingDurableJobGraph(tx, &existingBatch, &existingBatchOperation, batchOperationID, request, preparedJobs, predecessorMap)
+			if loadErr != nil {
+				return loadErr
+			}
+			batchID = existingBatch.ID
+			result = existingJobs
+			return nil
+		}
+		if !errors.Is(existingOperationErr, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("find durable batch operation: %w", existingOperationErr)
+		}
+
+		deliveryID := delivery.DeliveryID
+		batchOperation := models.ControlOperation{
+			OperationID:      batchOperationID.String(),
+			OperationKind:    "digger_batch",
+			IdentitySHA256:   graphIntentSHA256,
+			GithubDeliveryID: &deliveryID,
+			WriterEpoch:      request.Identity.WriterEpoch,
+			ProtocolVersion:  request.Identity.ProtocolVersion,
+			Status:           models.ControlOperationPending,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if createErr := tx.Omit("Delivery").Create(&batchOperation).Error; createErr != nil {
+			return fmt.Errorf("create durable batch operation: %w", createErr)
+		}
+
+		batchOperationValue := batchOperationID.String()
+		writerEpoch := request.Identity.WriterEpoch
+		batch := models.DiggerBatch{
+			ID:                       uuid.New(),
+			OperationID:              &batchOperationValue,
+			ProtocolVersion:          request.Identity.ProtocolVersion,
+			WriterEpoch:              &writerEpoch,
+			DiggerBatchID:            uniuri.NewLen(7),
+			VCS:                      models.DiggerVCSGithub,
+			VCSConnectionId:          request.VCSConnectionID,
+			GithubInstallationId:     request.GithubInstallationID,
+			RepoOwner:                request.RepoOwner,
+			RepoName:                 request.RepoName,
+			RepoFullName:             request.RepoFullName,
+			PrNumber:                 request.PullRequestNumber,
+			CommitSha:                request.CommitSHA,
+			CommentId:                request.CommentID,
+			Status:                   scheduler.BatchJobCreated,
+			BranchName:               request.Branch,
+			DiggerConfig:             request.DiggerConfig,
+			BatchType:                request.JobType,
+			AiSummaryCommentId:       request.AISummaryCommentID,
+			ReportTerraformOutputs:   request.ReportTerraformOutput,
+			CoverAllImpactedProjects: request.CoverAllImpactedProjects,
+		}
+		if request.BatchCheckRunData != nil {
+			batch.CheckRunId = &request.BatchCheckRunData.Id
+			batch.CheckRunUrl = &request.BatchCheckRunData.Url
+		}
+		if createErr := tx.Omit("Operation", "VCSConnection").Create(&batch).Error; createErr != nil {
+			return fmt.Errorf("create durable batch: %w", createErr)
+		}
+
+		for _, preparedJob := range preparedJobs {
+			jobOperationValue := preparedJob.operationID.String()
+			summary := models.DiggerJobSummary{}
+			if createErr := tx.Create(&summary).Error; createErr != nil {
+				return fmt.Errorf("create durable job summary for %q: %w", preparedJob.projectName, createErr)
+			}
+			batchIDString := batch.ID.String()
+			workflowURL := "#"
+			job := models.DiggerJob{
+				DiggerJobID:            uniuri.NewLen(10),
+				OperationID:            &jobOperationValue,
+				ProtocolVersion:        request.Identity.ProtocolVersion,
+				WriterEpoch:            &writerEpoch,
+				Status:                 scheduler.DiggerJobCreated,
+				ProjectName:            preparedJob.projectName,
+				BatchID:                &batchIDString,
+				CheckRunId:             preparedJob.checkRunID,
+				CheckRunUrl:            preparedJob.checkRunURL,
+				SerializedJobSpec:      preparedJob.serializedSpec,
+				DependencyOperationIDs: preparedJob.dependencyOperationIDs,
+				DiggerJobSummaryID:     summary.ID,
+				DiggerJobSummary:       summary,
+				WorkflowRunUrl:         &workflowURL,
+				WorkflowFile:           preparedJob.workflowFile,
+				ReporterType:           request.JobReporterType,
+			}
+			jobIntentSHA256, digestErr := models.DurableJobIntentSHA256(&job)
+			if digestErr != nil {
+				return fmt.Errorf("digest durable job %q: %w", preparedJob.projectName, digestErr)
+			}
+			jobOperation := models.ControlOperation{
+				OperationID:      jobOperationValue,
+				OperationKind:    "digger_job",
+				IdentitySHA256:   jobIntentSHA256,
+				GithubDeliveryID: &deliveryID,
+				WriterEpoch:      request.Identity.WriterEpoch,
+				ProtocolVersion:  request.Identity.ProtocolVersion,
+				Status:           models.ControlOperationPending,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			if createErr := tx.Omit("Delivery").Create(&jobOperation).Error; createErr != nil {
+				return fmt.Errorf("create durable job operation for %q: %w", preparedJob.projectName, createErr)
+			}
+			if createErr := tx.Omit("Operation", "Batch", "DiggerJobSummary").Create(&job).Error; createErr != nil {
+				return fmt.Errorf("create durable job for %q: %w", preparedJob.projectName, createErr)
+			}
+
+			jobDatabaseID := job.ID
+			jobToken := models.JobToken{
+				Value:               preparedJob.tokenValue,
+				Expiry:              now,
+				OrganisationID:      request.OrganisationID,
+				DiggerJobDatabaseID: &jobDatabaseID,
+				Type:                models.CliJobAccessType,
+			}
+			if createErr := tx.Omit("Organisation", "DiggerJob").Create(&jobToken).Error; createErr != nil {
+				return fmt.Errorf("create durable job token for %q: %w", preparedJob.projectName, createErr)
+			}
+			link := models.GithubDiggerJobLink{Status: models.DiggerJobLinkCreated, DiggerJobId: job.DiggerJobID, RepoFullName: request.RepoFullName}
+			if createErr := tx.Omit("DiggerJob").Create(&link).Error; createErr != nil {
+				return fmt.Errorf("create durable job link for %q: %w", preparedJob.projectName, createErr)
+			}
+			if len(predecessorMap[preparedJob.projectName]) == 0 {
+				dispatchPayload, marshalErr := json.Marshal(models.GithubWorkflowDispatchPayload{
+					OperationID: jobOperationValue,
+					DiggerJobID: job.DiggerJobID,
+				})
+				if marshalErr != nil {
+					return fmt.Errorf("marshal durable workflow dispatch for %q: %w", preparedJob.projectName, marshalErr)
+				}
+				effect := models.NewOutboxEffect(
+					jobOperationValue,
+					models.GithubWorkflowDispatchEffectKind,
+					"job:"+jobOperationValue,
+					dispatchPayload,
+					request.Identity.WriterEpoch,
+					now,
+				)
+				if _, created, enqueueErr := models.EnqueueOutboxEffectTx(tx, effect); enqueueErr != nil {
+					return fmt.Errorf("enqueue durable workflow dispatch for %q: %w", preparedJob.projectName, enqueueErr)
+				} else if !created {
+					return ErrDurableJobGraphConflict
+				}
+			}
+			result[preparedJob.projectName] = &job
+		}
+
+		for _, projectName := range projectOrder {
+			parentNames := durableParentNames(predecessorMap[projectName])
+			for _, parentName := range parentNames {
+				parentJob, parentExists := result[parentName]
+				childJob, childExists := result[projectName]
+				if !parentExists || !childExists {
+					return fmt.Errorf("durable dependency %q -> %q does not reference persisted jobs", parentName, projectName)
+				}
+				parentLink := models.DiggerJobParentLink{ParentDiggerJobId: parentJob.DiggerJobID, DiggerJobId: childJob.DiggerJobID}
+				if createErr := tx.Omit("DiggerJob", "ParentDiggerJob").Create(&parentLink).Error; createErr != nil {
+					return fmt.Errorf("create durable dependency %q -> %q: %w", parentName, projectName, createErr)
+				}
+			}
+		}
+
+		batchID = batch.ID
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return &batchID, result, nil
+}
+
+func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, jobOperationIDs map[string]operation.ID, predecessorMap map[string]map[string]graph.Edge[string], organisationName string) ([]durablePreparedJob, error) {
+	preparedJobs := make([]durablePreparedJob, 0, len(projectOrder))
+	backendHostName := GetPublicBaseURL()
+	for _, projectName := range projectOrder {
+		job := request.Jobs[projectName]
+		project := request.Projects[projectName]
+		tokenValue := "cli:" + uuid.NewString()
+		serializedSpec, err := json.Marshal(scheduler.JobToJson(job, request.JobType, organisationName, request.Branch, request.CommitSHA, tokenValue, backendHostName, project))
+		if err != nil {
+			return nil, fmt.Errorf("marshal durable job %q: %w", projectName, err)
+		}
+		var intentSpec scheduler.JobJson
+		if err := json.Unmarshal(serializedSpec, &intentSpec); err != nil {
+			return nil, fmt.Errorf("normalize durable job %q: %w", projectName, err)
+		}
+		intentSpec.BackendJobToken = ""
+		intentSpec.BackendHostname = ""
+		intentSpec.BackendOrganisationName = ""
+		serializedIntentSpec, err := json.Marshal(intentSpec)
+		if err != nil {
+			return nil, fmt.Errorf("marshal durable job intent %q: %w", projectName, err)
+		}
+		parentOperationIDs := make([]string, 0, len(predecessorMap[projectName]))
+		for parentName := range predecessorMap[projectName] {
+			parentOperationID, ok := jobOperationIDs[parentName]
+			if !ok {
+				return nil, fmt.Errorf("missing durable parent operation for %q", parentName)
+			}
+			parentOperationIDs = append(parentOperationIDs, parentOperationID.String())
+		}
+		sort.Strings(parentOperationIDs)
+		serializedParentOperationIDs, err := json.Marshal(parentOperationIDs)
+		if err != nil {
+			return nil, fmt.Errorf("marshal durable parent operations for %q: %w", projectName, err)
+		}
+		prepared := durablePreparedJob{
+			projectName:            projectName,
+			operationID:            jobOperationIDs[projectName],
+			serializedSpec:         serializedSpec,
+			intentSpec:             serializedIntentSpec,
+			dependencyOperationIDs: serializedParentOperationIDs,
+			tokenValue:             tokenValue,
+			workflowFile:           project.WorkflowFile,
+		}
+		if checkRunData, ok := request.JobCheckRunDataByProject[projectName]; ok {
+			prepared.checkRunID = &checkRunData.Id
+			prepared.checkRunURL = &checkRunData.Url
+		}
+		preparedJobs = append(preparedJobs, prepared)
+	}
+	return preparedJobs, nil
+}
+
+func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (string, error) {
+	intent := durableGraphIntent{
+		ProtocolVersion:          request.Identity.ProtocolVersion,
+		JobType:                  request.JobType,
+		JobReporterType:          request.JobReporterType,
+		OrganisationID:           request.OrganisationID,
+		GithubInstallationID:     request.GithubInstallationID,
+		Branch:                   request.Branch,
+		PullRequestNumber:        request.PullRequestNumber,
+		RepoOwner:                request.RepoOwner,
+		RepoName:                 request.RepoName,
+		RepoFullName:             request.RepoFullName,
+		CommitSHA:                request.CommitSHA,
+		CommentID:                request.CommentID,
+		DiggerConfig:             request.DiggerConfig,
+		AISummaryCommentID:       request.AISummaryCommentID,
+		ReportTerraformOutput:    request.ReportTerraformOutput,
+		CoverAllImpactedProjects: request.CoverAllImpactedProjects,
+		VCSConnectionID:          request.VCSConnectionID,
+		BatchCheckRunData:        request.BatchCheckRunData,
+		Jobs:                     make([]durableJobIntent, 0, len(preparedJobs)),
+	}
+	for _, preparedJob := range preparedJobs {
+		intent.Jobs = append(intent.Jobs, durableJobIntent{
+			ProjectName:    preparedJob.projectName,
+			OperationID:    preparedJob.operationID.String(),
+			SerializedSpec: preparedJob.intentSpec,
+			WorkflowFile:   preparedJob.workflowFile,
+			CheckRunID:     preparedJob.checkRunID,
+			CheckRunURL:    preparedJob.checkRunURL,
+			Parents:        durableParentNames(predecessorMap[preparedJob.projectName]),
+		})
+	}
+	serializedIntent, err := json.Marshal(intent)
+	if err != nil {
+		return "", fmt.Errorf("marshal durable graph intent: %w", err)
+	}
+	digest := sha256.Sum256(serializedIntent)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func loadExistingDurableJobGraph(tx *gorm.DB, batch *models.DiggerBatch, batchOperation *models.ControlOperation, batchOperationID operation.ID, request DurableJobGraphRequest, expectedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (map[string]*models.DiggerJob, error) {
+	if batch.DeletedAt.Valid || batch.OperationID == nil || *batch.OperationID != batchOperationID.String() || batch.VCS != models.DiggerVCSGithub ||
+		batch.WriterEpoch == nil || batchOperation == nil || batchOperation.GithubDeliveryID == nil ||
+		batch.ProtocolVersion != batchOperation.ProtocolVersion || *batch.WriterEpoch != batchOperation.WriterEpoch ||
+		batch.GithubInstallationId != request.GithubInstallationID || batch.RepoFullName != request.RepoFullName ||
+		batch.RepoOwner != request.RepoOwner || batch.RepoName != request.RepoName || batch.PrNumber != request.PullRequestNumber ||
+		batch.CommitSha != request.CommitSHA || batch.BatchType != request.JobType || batch.BranchName != request.Branch ||
+		batch.DiggerConfig != request.DiggerConfig || !equalOptionalInt64(batch.CommentId, request.CommentID) ||
+		batch.AiSummaryCommentId != request.AISummaryCommentID || batch.ReportTerraformOutputs != request.ReportTerraformOutput ||
+		batch.CoverAllImpactedProjects != request.CoverAllImpactedProjects || !equalOptionalUint(batch.VCSConnectionId, request.VCSConnectionID) ||
+		!equalOptionalString(batch.CheckRunId, checkRunID(request.BatchCheckRunData)) ||
+		!equalOptionalString(batch.CheckRunUrl, checkRunURL(request.BatchCheckRunData)) {
+		return nil, ErrDurableJobGraphConflict
+	}
+	var persistedJobs []models.DiggerJob
+	if err := tx.Unscoped().Where("batch_id = ?", batch.ID.String()).Find(&persistedJobs).Error; err != nil {
+		return nil, fmt.Errorf("load existing durable jobs: %w", err)
+	}
+	if len(persistedJobs) != len(expectedJobs) {
+		return nil, ErrDurableJobGraphConflict
+	}
+
+	result := make(map[string]*models.DiggerJob, len(persistedJobs))
+	expectedByProject := make(map[string]durablePreparedJob, len(expectedJobs))
+	for _, expectedJob := range expectedJobs {
+		expectedByProject[expectedJob.projectName] = expectedJob
+	}
+	for jobIndex := range persistedJobs {
+		persistedJob := &persistedJobs[jobIndex]
+		expectedJob, expected := expectedByProject[persistedJob.ProjectName]
+		persistedDependencyOperationIDs, dependencyErr := models.CanonicalDependencyOperationIDs(persistedJob.DependencyOperationIDs)
+		if dependencyErr != nil {
+			return nil, ErrDurableJobGraphConflict
+		}
+		if !expected || persistedJob.DeletedAt.Valid || persistedJob.OperationID == nil || *persistedJob.OperationID != expectedJob.operationID.String() ||
+			persistedJob.WorkflowFile != expectedJob.workflowFile || persistedJob.ProtocolVersion != request.Identity.ProtocolVersion ||
+			persistedJob.ReporterType != request.JobReporterType || !equalOptionalString(persistedJob.CheckRunId, expectedJob.checkRunID) ||
+			!equalOptionalString(persistedJob.CheckRunUrl, expectedJob.checkRunURL) || string(persistedDependencyOperationIDs) != string(expectedJob.dependencyOperationIDs) {
+			return nil, ErrDurableJobGraphConflict
+		}
+		persistedJobIntentSHA256, err := models.DurableJobIntentSHA256(persistedJob)
+		if err != nil {
+			return nil, ErrDurableJobGraphConflict
+		}
+		var persistedJobOperation models.ControlOperation
+		if err := tx.First(&persistedJobOperation, "operation_id = ?", *persistedJob.OperationID).Error; err != nil {
+			return nil, fmt.Errorf("load existing durable job operation for %q: %w", persistedJob.ProjectName, err)
+		}
+		if persistedJobOperation.OperationKind != "digger_job" || persistedJobOperation.IdentitySHA256 != persistedJobIntentSHA256 ||
+			persistedJobOperation.GithubDeliveryID == nil || *persistedJobOperation.GithubDeliveryID != *batchOperation.GithubDeliveryID ||
+			persistedJobOperation.ProtocolVersion != batchOperation.ProtocolVersion || persistedJobOperation.WriterEpoch != batchOperation.WriterEpoch || persistedJob.WriterEpoch == nil ||
+			*persistedJob.WriterEpoch != persistedJobOperation.WriterEpoch {
+			return nil, ErrDurableJobGraphConflict
+		}
+		var token models.JobToken
+		if err := tx.Where("digger_job_database_id = ?", persistedJob.ID).First(&token).Error; err != nil {
+			return nil, fmt.Errorf("load existing durable job token for %q: %w", persistedJob.ProjectName, err)
+		}
+		var persistedSpec scheduler.JobJson
+		if err := json.Unmarshal(persistedJob.SerializedJobSpec, &persistedSpec); err != nil {
+			return nil, ErrDurableJobGraphConflict
+		}
+		if token.OrganisationID != request.OrganisationID || token.DiggerJobDatabaseID == nil || *token.DiggerJobDatabaseID != persistedJob.ID || token.Type != models.CliJobAccessType || persistedSpec.BackendJobToken != token.Value {
+			return nil, ErrDurableJobGraphConflict
+		}
+		persistedSpec.BackendJobToken = ""
+		persistedSpec.BackendHostname = ""
+		persistedSpec.BackendOrganisationName = ""
+		var expectedSpec scheduler.JobJson
+		if err := json.Unmarshal(expectedJob.serializedSpec, &expectedSpec); err != nil {
+			return nil, fmt.Errorf("decode expected durable job spec for %q: %w", expectedJob.projectName, err)
+		}
+		expectedSpec.BackendJobToken = ""
+		expectedSpec.BackendHostname = ""
+		expectedSpec.BackendOrganisationName = ""
+		persistedSpecJSON, err := json.Marshal(persistedSpec)
+		if err != nil {
+			return nil, fmt.Errorf("normalize persisted durable job spec for %q: %w", persistedJob.ProjectName, err)
+		}
+		expectedSpecJSON, err := json.Marshal(expectedSpec)
+		if err != nil {
+			return nil, fmt.Errorf("normalize expected durable job spec for %q: %w", expectedJob.projectName, err)
+		}
+		if string(persistedSpecJSON) != string(expectedSpecJSON) {
+			return nil, ErrDurableJobGraphConflict
+		}
+		var jobLinks []models.GithubDiggerJobLink
+		if err := tx.Where("digger_job_id = ?", persistedJob.DiggerJobID).Find(&jobLinks).Error; err != nil {
+			return nil, fmt.Errorf("load existing durable job links for %q: %w", persistedJob.ProjectName, err)
+		}
+		if len(jobLinks) != 1 || jobLinks[0].RepoFullName != request.RepoFullName {
+			return nil, ErrDurableJobGraphConflict
+		}
+		var dispatchEffects []models.OutboxEffect
+		if err := tx.Where("operation_id = ? AND effect_kind = ?", *persistedJob.OperationID, models.GithubWorkflowDispatchEffectKind).Find(&dispatchEffects).Error; err != nil {
+			return nil, fmt.Errorf("load existing durable workflow dispatch for %q: %w", persistedJob.ProjectName, err)
+		}
+		expectedDispatches := 0
+		if len(predecessorMap[persistedJob.ProjectName]) == 0 {
+			expectedDispatches = 1
+		}
+		if len(dispatchEffects) != expectedDispatches {
+			return nil, ErrDurableJobGraphConflict
+		}
+		if expectedDispatches == 1 {
+			canonicalPayload, err := json.Marshal(models.GithubWorkflowDispatchPayload{
+				OperationID: *persistedJob.OperationID,
+				DiggerJobID: persistedJob.DiggerJobID,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal expected durable workflow dispatch for %q: %w", persistedJob.ProjectName, err)
+			}
+			expectedEffect := models.NewOutboxEffect(
+				*persistedJob.OperationID,
+				models.GithubWorkflowDispatchEffectKind,
+				"job:"+*persistedJob.OperationID,
+				canonicalPayload,
+				persistedJobOperation.WriterEpoch,
+				dispatchEffects[0].CreatedAt,
+			)
+			if !dispatchEffects[0].ValidPayloadDigest() || !dispatchEffects[0].HasSameIdentity(expectedEffect) {
+				return nil, ErrDurableJobGraphConflict
+			}
+		}
+		result[persistedJob.ProjectName] = persistedJob
+	}
+
+	expectedParentLinks := make(map[string]struct{})
+	for projectName, predecessors := range predecessorMap {
+		for _, parentName := range durableParentNames(predecessors) {
+			expectedParentLinks[result[parentName].DiggerJobID+"\x00"+result[projectName].DiggerJobID] = struct{}{}
+		}
+	}
+	jobIDs := make([]string, 0, len(result))
+	for _, job := range result {
+		jobIDs = append(jobIDs, job.DiggerJobID)
+	}
+	var persistedParentLinks []models.DiggerJobParentLink
+	if err := tx.Where("digger_job_id IN ? OR parent_digger_job_id IN ?", jobIDs, jobIDs).Find(&persistedParentLinks).Error; err != nil {
+		return nil, fmt.Errorf("load existing durable parent links: %w", err)
+	}
+	if len(persistedParentLinks) != len(expectedParentLinks) {
+		return nil, ErrDurableJobGraphConflict
+	}
+	for _, parentLink := range persistedParentLinks {
+		if _, expected := expectedParentLinks[parentLink.ParentDiggerJobId+"\x00"+parentLink.DiggerJobId]; !expected {
+			return nil, ErrDurableJobGraphConflict
+		}
+	}
+	return result, nil
+}
+
+func durableParentNames(predecessors map[string]graph.Edge[string]) []string {
+	parents := make([]string, 0, len(predecessors))
+	for parentName := range predecessors {
+		parents = append(parents, parentName)
+	}
+	sort.Strings(parents)
+	return parents
+}
+
+func equalOptionalInt64(first *int64, second *int64) bool {
+	return (first == nil && second == nil) || (first != nil && second != nil && *first == *second)
+}
+
+func equalOptionalUint(first *uint, second *uint) bool {
+	return (first == nil && second == nil) || (first != nil && second != nil && *first == *second)
+}
+
+func equalOptionalString(first *string, second *string) bool {
+	return (first == nil && second == nil) || (first != nil && second != nil && *first == *second)
+}
+
+func checkRunID(data *CheckRunData) *string {
+	if data == nil {
+		return nil
+	}
+	return &data.Id
+}
+
+func checkRunURL(data *CheckRunData) *string {
+	if data == nil {
+		return nil
+	}
+	return &data.Url
+}
+
+func durableTransactionNow(tx *gorm.DB) (time.Time, error) {
+	if tx.Dialector.Name() != "postgres" {
+		return time.Now().UTC(), nil
+	}
+	var now time.Time
+	if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
+		return time.Time{}, fmt.Errorf("read database time: %w", err)
+	}
+	return now.UTC(), nil
+}
+
 func TraverseGraphVisitAllParentsFirst(g graph.Graph[string, configuration.Project], visit func(value string) bool) error {
 	slog.Debug("Traversing graph, visiting all parents first")
 
@@ -286,7 +984,27 @@ func ImpactedProjectsOnlyGraph(projectsGraph graph.Graph[string, configuration.P
 	return graphWithImpactedProjectsOnly, nil
 }
 
-func CollapsedGraph(impactedParent *string, currentNode string, adjMap map[string]map[string]graph.Edge[string], g graph.Graph[string, configuration.Project], impactedProjects map[string]configuration.Project) error {
+func durableImpactedProjectsOnlyGraph(projectsGraph graph.Graph[string, configuration.Project], impactedProjects map[string]configuration.Project) (graph.Graph[string, configuration.Project], error) {
+	adjacencyMap, err := projectsGraph.AdjacencyMap()
+	if err != nil {
+		return nil, err
+	}
+	predecessorMap, err := projectsGraph.PredecessorMap()
+	if err != nil {
+		return nil, err
+	}
+	result := graph.NewLike(projectsGraph)
+	for node, predecessors := range predecessorMap {
+		if len(predecessors) == 0 {
+			if err := durableCollapsedGraph(nil, node, adjacencyMap, result, impactedProjects); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return result, nil
+}
+
+func durableCollapsedGraph(impactedParent *string, currentNode string, adjMap map[string]map[string]graph.Edge[string], g graph.Graph[string, configuration.Project], impactedProjects map[string]configuration.Project) error {
 	// add to the resulting graph only if the project has been impacted by changes
 	if _, ok := impactedProjects[currentNode]; ok {
 		currentProject, ok := impactedProjects[currentNode]
@@ -295,25 +1013,30 @@ func CollapsedGraph(impactedParent *string, currentNode string, adjMap map[strin
 			return fmt.Errorf("project %s not found", currentNode)
 		}
 
+		added := true
 		err := g.AddVertex(currentProject)
 		if err != nil {
 			if errors.Is(err, graph.ErrVertexAlreadyExists) {
-				return nil
+				added = false
+			} else {
+				slog.Error("Failed to add vertex",
+					"projectName", currentNode,
+					"error", err,
+				)
+				return err
 			}
-			slog.Error("Failed to add vertex",
-				"projectName", currentNode,
-				"error", err,
-			)
-			return err
 		}
 
-		slog.Debug("Added impacted project to graph", "projectName", currentNode)
+		if added {
+			slog.Debug("Added impacted project to graph", "projectName", currentNode)
 
-		// process all children nodes
-		for child := range adjMap[currentNode] {
-			err := CollapsedGraph(&currentNode, child, adjMap, g, impactedProjects)
-			if err != nil {
-				return err
+			// Process descendants only on the first visit. Later visits still add
+			// the additional parent edge without duplicating the subtree walk.
+			for child := range adjMap[currentNode] {
+				err := durableCollapsedGraph(&currentNode, child, adjMap, g, impactedProjects)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -321,6 +1044,9 @@ func CollapsedGraph(impactedParent *string, currentNode string, adjMap map[strin
 		if impactedParent != nil {
 			err := g.AddEdge(*impactedParent, currentNode)
 			if err != nil {
+				if errors.Is(err, graph.ErrEdgeAlreadyExists) {
+					return nil
+				}
 				slog.Error("Failed to add edge",
 					"parent", *impactedParent,
 					"child", currentNode,
@@ -337,8 +1063,48 @@ func CollapsedGraph(impactedParent *string, currentNode string, adjMap map[strin
 	} else {
 		// if current wasn't impacted, see children of current node and set currently known parent
 		for child := range adjMap[currentNode] {
-			err := CollapsedGraph(impactedParent, child, adjMap, g, impactedProjects)
+			err := durableCollapsedGraph(impactedParent, child, adjMap, g, impactedProjects)
 			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func CollapsedGraph(impactedParent *string, currentNode string, adjMap map[string]map[string]graph.Edge[string], g graph.Graph[string, configuration.Project], impactedProjects map[string]configuration.Project) error {
+	if _, ok := impactedProjects[currentNode]; ok {
+		currentProject, ok := impactedProjects[currentNode]
+		if !ok {
+			slog.Error("Project not found", "projectName", currentNode)
+			return fmt.Errorf("project %s not found", currentNode)
+		}
+
+		err := g.AddVertex(currentProject)
+		if err != nil {
+			if errors.Is(err, graph.ErrVertexAlreadyExists) {
+				return nil
+			}
+			slog.Error("Failed to add vertex", "projectName", currentNode, "error", err)
+			return err
+		}
+
+		slog.Debug("Added impacted project to graph", "projectName", currentNode)
+		for child := range adjMap[currentNode] {
+			if err := CollapsedGraph(&currentNode, child, adjMap, g, impactedProjects); err != nil {
+				return err
+			}
+		}
+		if impactedParent != nil {
+			if err := g.AddEdge(*impactedParent, currentNode); err != nil {
+				slog.Error("Failed to add edge", "parent", *impactedParent, "child", currentNode, "error", err)
+				return err
+			}
+			slog.Debug("Added edge between impacted projects", "parent", *impactedParent, "child", currentNode)
+		}
+	} else {
+		for child := range adjMap[currentNode] {
+			if err := CollapsedGraph(impactedParent, child, adjMap, g, impactedProjects); err != nil {
 				return err
 			}
 		}

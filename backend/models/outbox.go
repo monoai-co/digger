@@ -1,21 +1,30 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
+	"github.com/diggerhq/digger/libs/scheduler"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 var ErrOutboxEffectConflict = errors.New("outbox effect identity was already recorded with a different payload")
+var ErrOutboxEffectPayload = errors.New("outbox effect payload is invalid")
 
 func NewOutboxEffect(operationID string, effectKind string, effectKey string, payload []byte, writerEpoch int64, now time.Time) *OutboxEffect {
+	normalizedPayload, err := normalizeOutboxEffectPayload(effectKind, payload)
+	if err == nil {
+		payload = normalizedPayload
+	}
 	return &OutboxEffect{
 		ID:                 uuid.New(),
 		ControlOperationID: operationID,
@@ -40,10 +49,44 @@ func (effect *OutboxEffect) HasSameIdentity(other *OutboxEffect) bool {
 		effect.PayloadSHA256 == other.PayloadSHA256
 }
 
+func (effect *OutboxEffect) ValidPayloadDigest() bool {
+	if effect == nil {
+		return false
+	}
+	normalizedPayload, err := normalizeOutboxEffectPayload(effect.EffectKind, effect.Payload)
+	return err == nil && effect.PayloadSHA256 == payloadSHA256(normalizedPayload)
+}
+
+func normalizeOutboxEffectPayload(effectKind string, payload []byte) ([]byte, error) {
+	if effectKind != GithubWorkflowDispatchEffectKind {
+		return payload, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var workflowPayload GithubWorkflowDispatchPayload
+	if err := decoder.Decode(&workflowPayload); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrOutboxEffectPayload, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, ErrOutboxEffectPayload
+	}
+	canonical, err := json.Marshal(workflowPayload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrOutboxEffectPayload, err)
+	}
+	return canonical, nil
+}
+
 // EnqueueOutboxEffectTx records provider intent in the caller's authoritative
 // transaction. The caller must hold the control-plane fence for this epoch.
 func EnqueueOutboxEffectTx(tx *gorm.DB, effect *OutboxEffect) (*OutboxEffect, bool, error) {
-	effect.PayloadSHA256 = payloadSHA256(effect.Payload)
+	normalizedPayload, err := normalizeOutboxEffectPayload(effect.EffectKind, effect.Payload)
+	if err != nil {
+		return nil, false, err
+	}
+	effect.Payload = normalizedPayload
+	effect.PayloadSHA256 = payloadSHA256(normalizedPayload)
 	now, err := databaseTransactionNow(tx, time.Now().UTC())
 	if err != nil {
 		return nil, false, err
@@ -167,7 +210,7 @@ RETURNING *`,
 func (db *Database) RenewOutboxEffectLease(ctx context.Context, effectID uuid.UUID, leaseID string, now time.Time, leaseDuration time.Duration, databaseIdentity string, writerEpoch int64) error {
 	return db.updateClaimedOutboxEffect(ctx, effectID, leaseID, databaseIdentity, writerEpoch, func(tx *gorm.DB, effectiveNow time.Time) *gorm.DB {
 		return tx.Updates(map[string]any{"lease_expires_at": effectiveNow.Add(leaseDuration), "updated_at": effectiveNow})
-	}, now)
+	}, nil, now)
 }
 
 func (db *Database) CompleteOutboxEffect(ctx context.Context, effectID uuid.UUID, leaseID string, providerReceipt []byte, now time.Time, databaseIdentity string, writerEpoch int64) error {
@@ -181,7 +224,7 @@ func (db *Database) CompleteOutboxEffect(ctx context.Context, effectID uuid.UUID
 			"status":           OutboxEffectSucceeded,
 			"updated_at":       effectiveNow,
 		})
-	}, now)
+	}, completeDurableWorkflowDispatchTx, now)
 }
 
 func (db *Database) RetryOutboxEffect(ctx context.Context, effectID uuid.UUID, leaseID string, lastError string, retryDelay time.Duration, now time.Time, databaseIdentity string, writerEpoch int64) error {
@@ -194,7 +237,7 @@ func (db *Database) RetryOutboxEffect(ctx context.Context, effectID uuid.UUID, l
 			"status":           OutboxEffectRetrying,
 			"updated_at":       effectiveNow,
 		})
-	}, now)
+	}, nil, now)
 }
 
 func (db *Database) DeadLetterOutboxEffect(ctx context.Context, effectID uuid.UUID, leaseID string, lastError string, now time.Time, databaseIdentity string, writerEpoch int64) error {
@@ -207,7 +250,7 @@ func (db *Database) DeadLetterOutboxEffect(ctx context.Context, effectID uuid.UU
 			"status":           OutboxEffectDeadLetter,
 			"updated_at":       effectiveNow,
 		})
-	}, now)
+	}, deadLetterDurableWorkflowDispatchTx, now)
 }
 
 func (db *Database) updateClaimedOutboxEffect(
@@ -217,12 +260,24 @@ func (db *Database) updateClaimedOutboxEffect(
 	databaseIdentity string,
 	writerEpoch int64,
 	update func(*gorm.DB, time.Time) *gorm.DB,
+	afterUpdate func(*gorm.DB, *OutboxEffect, time.Time) error,
 	now time.Time,
 ) error {
 	return db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
 		effectiveNow, err := databaseTransactionNow(tx, now)
 		if err != nil {
 			return err
+		}
+		var effect OutboxEffect
+		effectQuery := tx
+		if tx.Dialector.Name() == "postgres" {
+			effectQuery = effectQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := effectQuery.First(&effect, "id = ?", effectID).Error; err != nil {
+			return err
+		}
+		if effect.Status != OutboxEffectProcessing || effect.LeaseID != leaseID || effect.WriterEpoch != writerEpoch {
+			return gorm.ErrRecordNotFound
 		}
 		result := update(tx.Model(&OutboxEffect{}).Where("id = ? AND status = ? AND lease_id = ? AND writer_epoch = ?", effectID, OutboxEffectProcessing, leaseID, writerEpoch), effectiveNow)
 		if result.Error != nil {
@@ -231,8 +286,92 @@ func (db *Database) updateClaimedOutboxEffect(
 		if result.RowsAffected != 1 {
 			return gorm.ErrRecordNotFound
 		}
+		if afterUpdate != nil {
+			return afterUpdate(tx, &effect, effectiveNow)
+		}
 		return nil
 	})
+}
+
+func completeDurableWorkflowDispatchTx(tx *gorm.DB, effect *OutboxEffect, now time.Time) error {
+	if effect.EffectKind != GithubWorkflowDispatchEffectKind {
+		return nil
+	}
+	state, err := loadDurableWorkflowDispatchStateTx(tx, effect)
+	if err != nil {
+		return err
+	}
+	switch state.Job.Status {
+	case scheduler.DiggerJobCreated, scheduler.DiggerJobQueuedForRun:
+		if state.JobOperation.Status != ControlOperationPending || state.Token.ActivatedAt == nil || state.Token.RevokedAt != nil {
+			return ErrDurableJobDispatchConflict
+		}
+		return tx.Model(&DiggerJob{}).Where("id = ?", state.Job.ID).Updates(map[string]any{
+			"status":            scheduler.DiggerJobTriggered,
+			"status_version":    gorm.Expr("status_version + 1"),
+			"status_updated_at": now,
+		}).Error
+	case scheduler.DiggerJobTriggered, scheduler.DiggerJobStarted:
+		if state.JobOperation.Status != ControlOperationPending || state.Token.ActivatedAt == nil || state.Token.RevokedAt != nil {
+			return ErrDurableJobDispatchConflict
+		}
+		return nil
+	case scheduler.DiggerJobSucceeded, scheduler.DiggerJobFailed:
+		return reconcileDurableTerminalJobTx(tx, &state.Job, &state.JobOperation, &state.Token, now)
+	default:
+		return ErrDurableJobDispatchConflict
+	}
+}
+
+func deadLetterDurableWorkflowDispatchTx(tx *gorm.DB, effect *OutboxEffect, now time.Time) error {
+	const savepoint = "durable_workflow_dead_letter"
+	if err := tx.SavePoint(savepoint).Error; err != nil {
+		return err
+	}
+	err := deadLetterDurableWorkflowDispatchBusinessTx(tx, effect, now)
+	if errors.Is(err, ErrDurableJobDispatchConflict) || errors.Is(err, gorm.ErrRecordNotFound) {
+		if rollbackErr := tx.RollbackTo(savepoint).Error; rollbackErr != nil {
+			return rollbackErr
+		}
+		return nil
+	}
+	return err
+}
+
+func deadLetterDurableWorkflowDispatchBusinessTx(tx *gorm.DB, effect *OutboxEffect, now time.Time) error {
+	if effect.EffectKind != GithubWorkflowDispatchEffectKind {
+		return nil
+	}
+	state, err := loadDurableWorkflowDispatchStateTx(tx, effect)
+	if err != nil {
+		return err
+	}
+	if state.Job.Status == scheduler.DiggerJobSucceeded || state.Job.Status == scheduler.DiggerJobFailed {
+		if err := reconcileDurableTerminalJobTx(tx, &state.Job, &state.JobOperation, &state.Token, now); err != nil {
+			return err
+		}
+		if err := tx.Model(&OutboxEffect{}).Where("id = ?", effect.ID).Updates(map[string]any{
+			"last_error":       "",
+			"provider_receipt": []byte(`{"accepted":false,"terminal_noop":true}`),
+			"status":           OutboxEffectSucceeded,
+			"updated_at":       now,
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	}
+	if state.JobOperation.Status != ControlOperationPending {
+		return ErrDurableJobDispatchConflict
+	}
+	if err := tx.Model(&DiggerJob{}).Where("id = ?", state.Job.ID).Updates(map[string]any{
+		"status":            scheduler.DiggerJobFailed,
+		"status_version":    gorm.Expr("status_version + 1"),
+		"status_updated_at": now,
+	}).Error; err != nil {
+		return err
+	}
+	state.Job.Status = scheduler.DiggerJobFailed
+	return reconcileDurableTerminalJobTx(tx, &state.Job, &state.JobOperation, &state.Token, now)
 }
 
 func databaseTransactionNow(tx *gorm.DB, fallback time.Time) (time.Time, error) {

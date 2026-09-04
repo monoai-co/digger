@@ -25,8 +25,10 @@ type ImpactedProject struct {
 
 type DiggerJobParentLink struct {
 	gorm.Model
-	DiggerJobId       string `gorm:"size:50,index:idx_digger_job_id"`
-	ParentDiggerJobId string `gorm:"size:50,index:idx_parent_digger_job_id"`
+	DiggerJobId       string     `gorm:"type:text;index:idx_digger_job_parent_links_child_id;uniqueIndex:idx_digger_job_parent_links_edge,priority:1"`
+	DiggerJob         *DiggerJob `gorm:"foreignKey:DiggerJobId;references:DiggerJobID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	ParentDiggerJobId string     `gorm:"type:text;index:idx_digger_job_parent_links_parent_id;uniqueIndex:idx_digger_job_parent_links_edge,priority:2"`
+	ParentDiggerJob   *DiggerJob `gorm:"foreignKey:ParentDiggerJobId;references:DiggerJobID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 }
 
 type DiggerVCSType string
@@ -71,7 +73,7 @@ type DiggerBatch struct {
 
 type DiggerJob struct {
 	gorm.Model
-	DiggerJobID                  string  `gorm:"size:50,index:idx_digger_job_id"`
+	DiggerJobID                  string  `gorm:"type:text;uniqueIndex:idx_digger_jobs_public_id"`
 	OperationID                  *string `gorm:"type:text;uniqueIndex:idx_digger_jobs_operation_id,where:operation_id IS NOT NULL"`
 	ProtocolVersion              int     `gorm:"type:integer;not null;default:1"`
 	StatusVersion                int64   `gorm:"not null;default:0"`
@@ -96,6 +98,7 @@ type DiggerJob struct {
 	SerializedVcsSpec            []byte
 	SerializedPolicySpec         []byte
 	SerializedVariablesSpec      []byte
+	DependencyOperationIDs       []byte `gorm:"type:jsonb;not null;default:'[]'"`
 	TerraformOutput              string
 	// represents a footprint of terraform plan json for similarity checks
 	PlanFootprint   []byte
@@ -115,8 +118,10 @@ type DiggerJobSummary struct {
 // These tokens will be pre
 type JobToken struct {
 	gorm.Model
-	Value               string `gorm:"uniqueJobTokenIndex:idx_token"`
+	Value               string `gorm:"uniqueIndex:idx_job_tokens_value,where:value IS NOT NULL"`
 	Expiry              time.Time
+	ActivatedAt         *time.Time
+	RevokedAt           *time.Time
 	OrganisationID      uint
 	Organisation        Organisation
 	DiggerJobDatabaseID *uint      `gorm:"uniqueIndex:idx_job_tokens_digger_job_database_id,where:digger_job_database_id IS NOT NULL"`
@@ -125,7 +130,9 @@ type JobToken struct {
 }
 
 type JobCreationIdentity struct {
+	DatabaseIdentity    string
 	DeliveryOperationID string
+	DeliveryLeaseID     string
 	WriterEpoch         int64
 	ProtocolVersion     int
 }
@@ -140,7 +147,8 @@ const (
 // GithubDiggerJobLink links GitHub Workflow Job id to Digger's Job Id
 type GithubDiggerJobLink struct {
 	gorm.Model
-	DiggerJobId         string `gorm:"size:50,index:idx_digger_job_id"`
+	DiggerJobId         string     `gorm:"type:text;index:idx_github_digger_job_links_digger_job_id"`
+	DiggerJob           *DiggerJob `gorm:"foreignKey:DiggerJobId;references:DiggerJobID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	RepoFullName        string
 	GithubJobId         int64 `gorm:"index:idx_github_job_id"`
 	GithubWorkflowRunId int64

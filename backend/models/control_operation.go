@@ -18,7 +18,7 @@ type ControlOperation struct {
 	OperationID      string                 `gorm:"type:text;primaryKey"`
 	OperationKind    string                 `gorm:"type:text;not null"`
 	IdentitySHA256   string                 `gorm:"type:text;not null"`
-	GithubDeliveryID *string                `gorm:"column:delivery_id;type:text;index:idx_control_operations_delivery_lookup,where:delivery_id IS NOT NULL"`
+	GithubDeliveryID *string                `gorm:"column:delivery_id;type:text;index:idx_control_operations_delivery_lookup,where:delivery_id IS NOT NULL;uniqueIndex:idx_control_operations_delivery_batch,where:delivery_id IS NOT NULL AND operation_kind = 'digger_batch'"`
 	Delivery         *GithubWebhookDelivery `gorm:"foreignKey:GithubDeliveryID;references:DeliveryID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	WriterEpoch      int64                  `gorm:"not null"`
 	ProtocolVersion  int                    `gorm:"type:integer;not null;default:1"`
@@ -43,7 +43,7 @@ const (
 
 type OutboxEffect struct {
 	ID                 uuid.UUID          `gorm:"type:uuid;primaryKey"`
-	ControlOperationID string             `gorm:"column:operation_id;type:text;not null;uniqueIndex:idx_outbox_effect_identity,priority:1"`
+	ControlOperationID string             `gorm:"column:operation_id;type:text;not null;uniqueIndex:idx_outbox_effect_identity,priority:1;uniqueIndex:idx_outbox_workflow_dispatch_operation,where:effect_kind = 'github_workflow_dispatch'"`
 	Operation          *ControlOperation  `gorm:"foreignKey:ControlOperationID;references:OperationID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	EffectKind         string             `gorm:"type:text;not null;uniqueIndex:idx_outbox_effect_identity,priority:2"`
 	EffectKey          string             `gorm:"type:text;not null;uniqueIndex:idx_outbox_effect_identity,priority:3"`

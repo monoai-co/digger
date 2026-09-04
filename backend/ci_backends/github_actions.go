@@ -17,6 +17,10 @@ type GithubActionCi struct {
 }
 
 func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken string) error {
+	return g.TriggerWorkflowContext(context.Background(), spec, runName, vcsToken)
+}
+
+func (g GithubActionCi) TriggerWorkflowContext(ctx context.Context, spec spec.Spec, runName string, vcsToken string) error {
 	slog.Info("TriggerGithubWorkflow", "repoOwner", spec.VCS.RepoOwner, "repoName", spec.VCS.RepoName, "commentId", spec.CommentId)
 	client := g.Client
 	specBytes, err := json.Marshal(spec)
@@ -24,7 +28,7 @@ func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken
 		return fmt.Errorf("marshal workflow specification: %w", err)
 	}
 
-	repository, _, err := client.Repositories.Get(context.Background(), spec.VCS.RepoOwner, spec.VCS.RepoName)
+	repository, _, err := client.Repositories.Get(ctx, spec.VCS.RepoOwner, spec.VCS.RepoName)
 	if err != nil {
 		return fmt.Errorf("resolve repository control ref: %w", err)
 	}
@@ -38,7 +42,7 @@ func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken
 		RunName: runName,
 	}
 
-	_, err = client.Actions.CreateWorkflowDispatchEventByFileName(context.Background(), spec.VCS.RepoOwner, spec.VCS.RepoName, spec.VCS.WorkflowFile, github.CreateWorkflowDispatchEventRequest{
+	_, err = client.Actions.CreateWorkflowDispatchEventByFileName(ctx, spec.VCS.RepoOwner, spec.VCS.RepoName, spec.VCS.WorkflowFile, github.CreateWorkflowDispatchEventRequest{
 		Ref:    controlRef,
 		Inputs: inputs.ToMap(),
 	})

@@ -28,12 +28,16 @@ type outboxEffectStore interface {
 }
 
 type OutboxDispatchRequest struct {
-	EffectID       uuid.UUID
-	OperationID    string
-	EffectKind     string
-	EffectKey      string
-	Payload        json.RawMessage
-	IdempotencyKey string
+	EffectID         uuid.UUID
+	OperationID      string
+	EffectKind       string
+	EffectKey        string
+	Payload          json.RawMessage
+	IdempotencyKey   string
+	LeaseID          string
+	DatabaseIdentity string
+	WriterEpoch      int64
+	LeaseDuration    time.Duration
 }
 
 type OutboxDispatchResult struct {
@@ -283,12 +287,16 @@ func (d *OutboxDispatcher) dispatchClaim(workerIndex int, effect *models.OutboxE
 	defer cancel()
 	outcomeCh := make(chan outboxDispatchOutcome, 1)
 	request := OutboxDispatchRequest{
-		EffectID:       effect.ID,
-		OperationID:    effect.ControlOperationID,
-		EffectKind:     effect.EffectKind,
-		EffectKey:      effect.EffectKey,
-		Payload:        json.RawMessage(effect.Payload),
-		IdempotencyKey: "digger-outbox:" + effect.ID.String(),
+		EffectID:         effect.ID,
+		OperationID:      effect.ControlOperationID,
+		EffectKind:       effect.EffectKind,
+		EffectKey:        effect.EffectKey,
+		Payload:          json.RawMessage(effect.Payload),
+		IdempotencyKey:   "digger-outbox:" + effect.ID.String(),
+		LeaseID:          leaseID,
+		DatabaseIdentity: d.config.DatabaseIdentity,
+		WriterEpoch:      d.config.WriterEpoch,
+		LeaseDuration:    d.config.LeaseDuration,
 	}
 	go func() {
 		defer func() {
