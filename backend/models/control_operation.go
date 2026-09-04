@@ -74,13 +74,13 @@ const (
 )
 
 type ExecutionClaimAttempt struct {
-	ID                  uuid.UUID           `gorm:"type:uuid;primaryKey"`
-	ControlOperationID  string              `gorm:"column:operation_id;type:text;not null;uniqueIndex:idx_execution_claimant,priority:1;uniqueIndex:idx_execution_claim_granted_operation,where:state = 'granted'"`
+	ID                  uuid.UUID           `gorm:"type:uuid;primaryKey;uniqueIndex:idx_execution_claim_exact_identity,priority:1"`
+	ControlOperationID  string              `gorm:"column:operation_id;type:text;not null;uniqueIndex:idx_execution_claimant,priority:1;uniqueIndex:idx_execution_claim_granted_operation,where:state = 'granted';uniqueIndex:idx_execution_claim_exact_identity,priority:2"`
 	Operation           *ControlOperation   `gorm:"foreignKey:ControlOperationID;references:OperationID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	DiggerJobID         string              `gorm:"type:text;not null"`
-	DiggerJobDatabaseID uint                `gorm:"not null;check:execution_claim_attempts_positive_ids_check,digger_job_database_id > 0 AND job_token_id > 0 AND run_id > 0 AND run_attempt > 0 AND protocol_version > 0"`
+	DiggerJobDatabaseID uint                `gorm:"not null;uniqueIndex:idx_execution_claim_exact_identity,priority:3;check:execution_claim_attempts_positive_ids_check,digger_job_database_id > 0 AND job_token_id > 0 AND run_id > 0 AND run_attempt > 0 AND protocol_version > 0"`
 	ExactJob            *DiggerJob          `gorm:"foreignKey:DiggerJobDatabaseID,ControlOperationID,DiggerJobID;references:ID,OperationID,DiggerJobID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
-	JobTokenID          uint                `gorm:"not null"`
+	JobTokenID          uint                `gorm:"not null;uniqueIndex:idx_execution_claim_exact_identity,priority:4"`
 	ExactJobToken       *JobToken           `gorm:"foreignKey:DiggerJobDatabaseID,JobTokenID;references:DiggerJobDatabaseID,ID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	RunID               int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:2"`
 	RunAttempt          int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:3"`
@@ -107,15 +107,24 @@ func (ExecutionClaimAttempt) TableName() string {
 }
 
 type JobStatusCallback struct {
-	CallbackID         uuid.UUID         `gorm:"type:uuid;primaryKey"`
-	ControlOperationID string            `gorm:"column:operation_id;type:text;not null;index:idx_job_status_callbacks_operation_id"`
-	Operation          *ControlOperation `gorm:"foreignKey:ControlOperationID;references:OperationID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
-	DiggerJobID        string            `gorm:"type:text;not null;index"`
-	PayloadSHA256      string            `gorm:"type:text;not null"`
-	StatusVersion      int64             `gorm:"not null"`
-	ResponseStatus     int               `gorm:"type:integer;not null"`
-	ResponseBody       []byte            `gorm:"type:jsonb;not null"`
-	CreatedAt          time.Time         `gorm:"not null"`
+	CallbackID              uuid.UUID              `gorm:"type:uuid;primaryKey"`
+	ControlOperationID      string                 `gorm:"column:operation_id;type:text;not null;index:idx_job_status_callbacks_operation_id;uniqueIndex:idx_job_status_callbacks_applied_version,priority:1,where:applied = true"`
+	Operation               *ControlOperation      `gorm:"foreignKey:ControlOperationID;references:OperationID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	DiggerJobID             string                 `gorm:"type:text;not null;index"`
+	DiggerJobDatabaseID     uint                   `gorm:"not null;check:job_status_callbacks_positive_ids_check,digger_job_database_id > 0 AND job_token_id > 0 AND expected_status_version > 0 AND status_version > 0 AND response_status BETWEEN 200 AND 599"`
+	ExactJob                *DiggerJob             `gorm:"foreignKey:DiggerJobDatabaseID,ControlOperationID,DiggerJobID;references:ID,OperationID,DiggerJobID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	JobTokenID              uint                   `gorm:"not null"`
+	ExactJobToken           *JobToken              `gorm:"foreignKey:DiggerJobDatabaseID,JobTokenID;references:DiggerJobDatabaseID,ID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	ExecutionClaimAttemptID uuid.UUID              `gorm:"type:uuid;not null"`
+	ExactExecutionClaim     *ExecutionClaimAttempt `gorm:"foreignKey:ExecutionClaimAttemptID,ControlOperationID,DiggerJobDatabaseID,JobTokenID;references:ID,ControlOperationID,DiggerJobDatabaseID,JobTokenID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	PayloadSHA256           string                 `gorm:"type:text;not null;check:job_status_callbacks_payload_digest_check,length(payload_sha256) = 64 AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(payload_sha256,'0',''),'1',''),'2',''),'3',''),'4',''),'5',''),'6',''),'7',''),'8',''),'9',''),'a',''),'b',''),'c',''),'d',''),'e',''),'f','')) = 0"`
+	TargetStatus            string                 `gorm:"type:text;not null;check:job_status_callbacks_target_status_check,target_status IN ('started','succeeded','failed')"`
+	ExpectedStatusVersion   int64                  `gorm:"not null"`
+	ResultStatusVersion     int64                  `gorm:"column:status_version;not null;uniqueIndex:idx_job_status_callbacks_applied_version,priority:2,where:applied = true"`
+	Applied                 bool                   `gorm:"not null;default:false"`
+	ResponseStatus          int                    `gorm:"type:integer;not null"`
+	ResponseBody            []byte                 `gorm:"type:jsonb;not null"`
+	CreatedAt               time.Time              `gorm:"not null"`
 }
 
 func (JobStatusCallback) TableName() string {

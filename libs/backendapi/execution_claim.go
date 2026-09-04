@@ -72,7 +72,7 @@ func positiveEnvironmentInt64(name string) (int64, error) {
 	return value, nil
 }
 
-func (d DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jobID string, request ExecutionClaimRequest) (*ExecutionClaimResponse, error) {
+func (d *DiggerApi) ClaimProjectJobExecution(repo string, projectName string, jobID string, request ExecutionClaimRequest) (*ExecutionClaimResponse, error) {
 	if request.RepositoryFullName != repo || request.ProjectName != projectName || strings.TrimSpace(jobID) == "" {
 		return nil, fmt.Errorf("execution claim route identity does not match its payload")
 	}
@@ -117,6 +117,19 @@ func (d DiggerApi) ClaimProjectJobExecution(repo string, projectName string, job
 			cancelRequest()
 			if !receipt.Granted || receipt.ExecutionGrant == "" {
 				return nil, fmt.Errorf("execution claim was not granted")
+			}
+			if receipt.GrantExpiresAt.IsZero() || !receipt.GrantExpiresAt.After(time.Now()) {
+				return nil, fmt.Errorf("execution claim grant is already expired")
+			}
+			d.durableExecutionContext = &durableExecutionContext{
+				RepositoryFullName:  repo,
+				ProjectName:         projectName,
+				DiggerJobID:         jobID,
+				OperationID:         request.OperationID,
+				ProtocolVersion:     request.ProtocolVersion,
+				DispatchWriterEpoch: request.DispatchWriterEpoch,
+				ExecutionGrant:      receipt.ExecutionGrant,
+				GrantExpiresAt:      receipt.GrantExpiresAt,
 			}
 			return &receipt, nil
 		}

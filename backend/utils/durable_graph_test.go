@@ -101,6 +101,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		&models.DiggerJobParentLink{},
 		&models.OutboxEffect{},
 		&models.ExecutionClaimAttempt{},
+		&models.JobStatusCallback{},
 	))
 	require.NoError(t, gormDB.Create(&models.ControlPlaneFence{
 		ID:               models.ControlPlaneFenceSingletonID,
@@ -145,14 +146,29 @@ func durableGraphTestRequest(t *testing.T, organisation *models.Organisation, de
 	rootOne := configuration.Project{Name: "root-one", WorkflowFile: "digger_workflow.yml"}
 	rootTwo := configuration.Project{Name: "root-two", WorkflowFile: "digger_workflow.yml"}
 	child := configuration.Project{Name: "child", WorkflowFile: "digger_workflow.yml", DependencyProjects: []string{"root-one", "root-two"}}
-	projects := []configuration.Project{rootOne, rootTwo, child}
+	return durableGraphTestRequestForProjects(t, organisation, delivery, []configuration.Project{rootOne, rootTwo, child})
+}
+
+func durableGraphTestRequestForProjects(t *testing.T, organisation *models.Organisation, delivery *models.GithubWebhookDelivery, projects []configuration.Project) DurableJobGraphRequest {
+	t.Helper()
 	projectsGraph, err := configuration.CreateProjectDependencyGraph(projects)
 	require.NoError(t, err)
 	pullRequestNumber := 42
-	jobs := map[string]scheduler.Job{
-		"root-one": {ProjectName: "root-one", Commands: []string{"digger plan"}, PullRequestNumber: &pullRequestNumber},
-		"root-two": {ProjectName: "root-two", Commands: []string{"digger plan"}, PullRequestNumber: &pullRequestNumber},
-		"child":    {ProjectName: "child", Commands: []string{"digger plan"}, PullRequestNumber: &pullRequestNumber},
+	jobs := make(map[string]scheduler.Job, len(projects))
+	projectByName := make(map[string]configuration.Project, len(projects))
+	for index := range projects {
+		project := projects[index]
+		job := scheduler.Job{ProjectName: project.Name, Commands: []string{"digger plan"}, PullRequestNumber: &pullRequestNumber}
+		switch index % 3 {
+		case 0:
+			job.RunEnvVars = map[string]string{"TEST_SECRET": project.Name + "-run-secret"}
+		case 1:
+			job.StateEnvVars = map[string]string{"TEST_SECRET": project.Name + "-state-secret"}
+		default:
+			job.CommandEnvVars = map[string]string{"TEST_SECRET": project.Name + "-command-secret"}
+		}
+		jobs[project.Name] = job
+		projectByName[project.Name] = project
 	}
 	return DurableJobGraphRequest{
 		Identity: models.JobCreationIdentity{
@@ -166,7 +182,7 @@ func durableGraphTestRequest(t *testing.T, organisation *models.Organisation, de
 		JobReporterType:          "lazy",
 		OrganisationID:           organisation.ID,
 		Jobs:                     jobs,
-		Projects:                 map[string]configuration.Project{"root-one": rootOne, "root-two": rootTwo, "child": child},
+		Projects:                 projectByName,
 		ProjectsGraph:            projectsGraph,
 		GithubInstallationID:     delivery.InstallationIDValue(),
 		Branch:                   "feature/durable-graph",
@@ -181,15 +197,24 @@ func durableGraphTestRequest(t *testing.T, organisation *models.Organisation, de
 }
 
 func prepareDurableExecutionClaimTest(t *testing.T, database *models.Database, organisation *models.Organisation, delivery *models.GithubWebhookDelivery) (*models.DiggerJob, models.DurableExecutionClaimRequest, string) {
+	return prepareDurableExecutionClaimForProjectTest(t, database, organisation, delivery, "root-one", 1001)
+}
+
+func prepareDurableExecutionClaimForProjectTest(t *testing.T, database *models.Database, organisation *models.Organisation, delivery *models.GithubWebhookDelivery, projectName string, runID int64) (*models.DiggerJob, models.DurableExecutionClaimRequest, string) {
+	return prepareDurableExecutionClaimForRequestTest(t, database, durableGraphTestRequest(t, organisation, delivery), projectName, runID)
+}
+
+func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.Database, request DurableJobGraphRequest, projectName string, runID int64) (*models.DiggerJob, models.DurableExecutionClaimRequest, string) {
 	t.Helper()
-	_, jobs, err := ConvertJobsToDiggerJobsDurable(context.Background(), durableGraphTestRequest(t, organisation, delivery))
+	_, jobs, err := ConvertJobsToDiggerJobsDurable(context.Background(), request)
 	require.NoError(t, err)
-	job := jobs["root-one"]
+	job := jobs[projectName]
+	require.NotNil(t, job)
 	require.NotNil(t, job.OperationID)
 	var effect models.OutboxEffect
 	require.NoError(t, database.GormDB.First(&effect, "operation_id = ? AND effect_kind = ?", *job.OperationID, models.GithubWorkflowDispatchEffectKind).Error)
 	now := time.Now().UTC()
-	const leaseID = "execution-claim-dispatch-lease"
+	leaseID := "execution-claim-dispatch-lease-" + projectName
 	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("id = ?", effect.ID).Updates(map[string]any{
 		"status":           models.OutboxEffectProcessing,
 		"lease_id":         leaseID,
@@ -213,7 +238,7 @@ func prepareDurableExecutionClaimTest(t *testing.T, database *models.Database, o
 		DiggerJobID:         job.DiggerJobID,
 		RepositoryFullName:  "monoai-co/sre",
 		ProjectName:         job.ProjectName,
-		RunID:               1001,
+		RunID:               runID,
 		RunAttempt:          1,
 		WorkflowRef:         "monoai-co/sre/.github/workflows/digger_workflow.yml@refs/heads/main",
 		WorkflowSHA:         strings.Repeat("a", 40),

@@ -45,10 +45,13 @@ func (n NoopApi) DownloadJobArtefact(downloadTo string) (*string, error) {
 }
 
 type DiggerApi struct {
-	DiggerHost     string
-	AuthToken      string
-	HttpClient     *http.Client
-	ExecutionGrant string
+	DiggerHost               string
+	AuthToken                string
+	HttpClient               *http.Client
+	ExecutionGrant           string
+	durableExecutionContext  *durableExecutionContext
+	durableStatusRetryWindow time.Duration
+	durableStatusRetryDelay  time.Duration
 }
 
 func (d *DiggerApi) SetExecutionGrant(grant string) {
@@ -125,6 +128,21 @@ func (d DiggerApi) ReportProjectJobStatus(repo string, projectName string, jobId
 	}
 
 	workflowUrl := comment_utils.GetWorkflowUrl()
+	if d.hasDurableExecutionContext(repo, projectName, jobId) {
+		return d.reportDurableProjectJobStatus(
+			repo,
+			projectName,
+			jobId,
+			status,
+			timestamp,
+			planSummaryJson,
+			planFootprint.ToJson(),
+			PrCommentUrl,
+			PrCommentId,
+			terraformOutput,
+			workflowUrl,
+		)
+	}
 	u.Path = filepath.Join(u.Path, "repos", repoNameForBackendReporting, "projects", projectName, "jobs", jobId, "set-status")
 	request := map[string]interface{}{
 		"status":             status,

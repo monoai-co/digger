@@ -44,6 +44,7 @@ type DiggerController struct {
 	ControlPlaneWriterEpoch            int64
 	ExecutionGrantSecrets              map[string][]byte
 	ExecutionGrantSigningKeyID         string
+	OutboxDispatcher                   interface{ Wake() }
 }
 
 func (d DiggerController) GithubAppWebHook(c *gin.Context) {

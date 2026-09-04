@@ -2,8 +2,6 @@ package utils
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,38 +60,6 @@ type durablePreparedJob struct {
 	workflowFile           string
 	checkRunID             *string
 	checkRunURL            *string
-}
-
-type durableGraphIntent struct {
-	ProtocolVersion          int                     `json:"protocol_version"`
-	JobType                  scheduler.DiggerCommand `json:"job_type"`
-	JobReporterType          string                  `json:"job_reporter_type"`
-	OrganisationID           uint                    `json:"organisation_id"`
-	GithubInstallationID     int64                   `json:"github_installation_id"`
-	Branch                   string                  `json:"branch"`
-	PullRequestNumber        int                     `json:"pull_request_number"`
-	RepoOwner                string                  `json:"repo_owner"`
-	RepoName                 string                  `json:"repo_name"`
-	RepoFullName             string                  `json:"repo_full_name"`
-	CommitSHA                string                  `json:"commit_sha"`
-	CommentID                *int64                  `json:"comment_id"`
-	DiggerConfig             string                  `json:"digger_config"`
-	AISummaryCommentID       string                  `json:"ai_summary_comment_id"`
-	ReportTerraformOutput    bool                    `json:"report_terraform_output"`
-	CoverAllImpactedProjects bool                    `json:"cover_all_impacted_projects"`
-	VCSConnectionID          *uint                   `json:"vcs_connection_id"`
-	BatchCheckRunData        *CheckRunData           `json:"batch_check_run_data"`
-	Jobs                     []durableJobIntent      `json:"jobs"`
-}
-
-type durableJobIntent struct {
-	ProjectName    string          `json:"project_name"`
-	OperationID    string          `json:"operation_id"`
-	SerializedSpec json.RawMessage `json:"serialized_spec"`
-	WorkflowFile   string          `json:"workflow_file"`
-	CheckRunID     *string         `json:"check_run_id"`
-	CheckRunURL    *string         `json:"check_run_url"`
-	Parents        []string        `json:"parents"`
 }
 
 // ConvertJobsToDiggerJobs jobs is map with project name as a key and a Job as a value
@@ -662,7 +628,11 @@ func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, j
 }
 
 func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (string, error) {
-	intent := durableGraphIntent{
+	var batchCheckRunData *models.DurableGraphCheckRunData
+	if request.BatchCheckRunData != nil {
+		batchCheckRunData = &models.DurableGraphCheckRunData{Id: request.BatchCheckRunData.Id, Url: request.BatchCheckRunData.Url}
+	}
+	intent := models.DurableGraphIntent{
 		ProtocolVersion:          request.Identity.ProtocolVersion,
 		JobType:                  request.JobType,
 		JobReporterType:          request.JobReporterType,
@@ -680,11 +650,11 @@ func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []dur
 		ReportTerraformOutput:    request.ReportTerraformOutput,
 		CoverAllImpactedProjects: request.CoverAllImpactedProjects,
 		VCSConnectionID:          request.VCSConnectionID,
-		BatchCheckRunData:        request.BatchCheckRunData,
-		Jobs:                     make([]durableJobIntent, 0, len(preparedJobs)),
+		BatchCheckRunData:        batchCheckRunData,
+		Jobs:                     make([]models.DurableGraphJobIntent, 0, len(preparedJobs)),
 	}
 	for _, preparedJob := range preparedJobs {
-		intent.Jobs = append(intent.Jobs, durableJobIntent{
+		intent.Jobs = append(intent.Jobs, models.DurableGraphJobIntent{
 			ProjectName:    preparedJob.projectName,
 			OperationID:    preparedJob.operationID.String(),
 			SerializedSpec: preparedJob.intentSpec,
@@ -694,12 +664,7 @@ func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []dur
 			Parents:        durableParentNames(predecessorMap[preparedJob.projectName]),
 		})
 	}
-	serializedIntent, err := json.Marshal(intent)
-	if err != nil {
-		return "", fmt.Errorf("marshal durable graph intent: %w", err)
-	}
-	digest := sha256.Sum256(serializedIntent)
-	return hex.EncodeToString(digest[:]), nil
+	return intent.SHA256()
 }
 
 func loadExistingDurableJobGraph(tx *gorm.DB, batch *models.DiggerBatch, batchOperation *models.ControlOperation, batchOperationID operation.ID, request DurableJobGraphRequest, expectedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (map[string]*models.DiggerJob, error) {

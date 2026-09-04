@@ -201,6 +201,7 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	r.POST("/github/webhook", diggerController.GithubAppWebHook)
 	// Legacy webhook path kept for backward compatibility.
 	r.POST("/github-app-webhook", diggerController.GithubAppWebHook)
+	r.POST("/v1/jobs/:jobId/status-callbacks/:callbackId", diggerController.DurableJobStatusCallback)
 
 	tenantActionsGroup := r.Group("/api/tenants")
 	tenantActionsGroup.Use(middleware.CORSMiddleware())

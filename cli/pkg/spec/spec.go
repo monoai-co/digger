@@ -17,11 +17,18 @@ import (
 
 func reportError(spec spec.Spec, backendApi backend2.Api, message string, err error) {
 	slog.Error(message)
-	_, reportingError := backendApi.ReportProjectJobStatus(spec.VCS.RepoName, spec.Job.ProjectName, spec.JobId, "failed", time.Now(), nil, "", "", "", "", nil)
+	_, reportingError := backendApi.ReportProjectJobStatus(statusRepository(spec), spec.Job.ProjectName, spec.JobId, "failed", time.Now(), nil, "", "", "", "", nil)
 	if reportingError != nil {
 		usage.ReportErrorAndExit(spec.VCS.RepoOwner, fmt.Sprintf("Failed to run commands. %v", err), 5)
 	}
 	usage.ReportErrorAndExit(spec.VCS.Actor, message, 1)
+}
+
+func statusRepository(jobSpec spec.Spec) string {
+	if jobSpec.VCS.RepoFullname != "" {
+		return jobSpec.VCS.RepoFullname
+	}
+	return jobSpec.VCS.RepoName
 }
 
 func RunSpec(
@@ -153,7 +160,7 @@ func RunSpec(
 
 	jobs := []scheduler.Job{job}
 
-	_, err = backendApi.ReportProjectJobStatus(spec.VCS.RepoName, spec.Job.ProjectName, spec.JobId, "started", time.Now(), nil, "", "", "", "", nil)
+	_, err = backendApi.ReportProjectJobStatus(statusRepository(spec), spec.Job.ProjectName, spec.JobId, "started", time.Now(), nil, "", "", "", "", nil)
 	if err != nil {
 		message := fmt.Sprintf("Failed to report jobSpec status to backend. Exiting. %v", err)
 		reportError(spec, backendApi, message, err)
@@ -174,7 +181,7 @@ func RunSpec(
 	reportTerraformOutput := spec.Reporter.ReportTerraformOutput
 	allAppliesSuccess, _, err := digger.RunJobs(jobs, prService, orgService, lock, reporter, planStorage, policyChecker, commentUpdater, backendApi, spec.JobId, true, reportTerraformOutput, commentId, currentDir)
 	if !allAppliesSuccess || err != nil {
-		serializedBatch, reportingError := backendApi.ReportProjectJobStatus(spec.VCS.RepoName, spec.Job.ProjectName, spec.JobId, "failed", time.Now(), nil, "", "", "", "", nil)
+		serializedBatch, reportingError := backendApi.ReportProjectJobStatus(statusRepository(spec), spec.Job.ProjectName, spec.JobId, "failed", time.Now(), nil, "", "", "", "", nil)
 		if reportingError != nil {
 			message := fmt.Sprintf("Failed run commands. %v", err)
 			reportError(spec, backendApi, message, err)
