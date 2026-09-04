@@ -437,6 +437,25 @@ func TestClaimDurableJobExecutionRequiresCommittedDispatchAndExactRoute(t *testi
 	}
 }
 
+func TestClaimDurableJobExecutionRejectsUncommittedRunAttemptBeforeMutation(t *testing.T) {
+	database, organisation, delivery := newDurableGraphTestDatabase(t)
+	job, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	request.RunAttempt = 2
+	_, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets([]byte(strings.Repeat("grant-secret-", 3))), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+	var storedJob models.DiggerJob
+	require.NoError(t, database.GormDB.First(&storedJob, "id = ?", job.ID).Error)
+	require.Equal(t, scheduler.DiggerJobTriggered, storedJob.Status)
+	require.Equal(t, int64(1), storedJob.StatusVersion)
+	var attempts int64
+	require.NoError(t, database.GormDB.Model(&models.ExecutionClaimAttempt{}).Count(&attempts).Error)
+	require.Zero(t, attempts)
+	var storedToken models.JobToken
+	require.NoError(t, database.GormDB.First(&storedToken, "digger_job_database_id = ?", job.ID).Error)
+	require.Nil(t, storedToken.RevokedAt)
+	require.NotNil(t, storedToken.ActivatedAt)
+}
+
 func TestClaimDurableJobExecutionReplaySurvivesWriterHandoff(t *testing.T) {
 	database, organisation, delivery := newDurableGraphTestDatabase(t)
 	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)

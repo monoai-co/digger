@@ -625,7 +625,7 @@ func (db *Database) ClaimDurableJobExecution(
 		}
 		dispatchReceipt, err := decodeDurableWorkflowDispatchReceipt(effect.ProviderReceipt)
 		if err != nil || dispatchReceipt.OperationID != request.OperationID || !dispatchReceipt.Accepted || dispatchReceipt.TerminalNoop ||
-			dispatchReceipt.RunID != request.RunID || dispatchReceipt.RunAttempt != 1 || dispatchReceipt.ControlRef == "" ||
+			dispatchReceipt.RunID != request.RunID || dispatchReceipt.RunAttempt != 1 || int64(dispatchReceipt.RunAttempt) != request.RunAttempt || dispatchReceipt.ControlRef == "" ||
 			dispatchReceipt.HeadSHA != request.WorkflowSHA {
 			return ErrDurableJobDispatchClaim
 		}
