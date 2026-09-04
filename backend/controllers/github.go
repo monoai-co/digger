@@ -45,9 +45,10 @@ type DiggerController struct {
 	ExecutionGrantSecrets              map[string][]byte
 	ExecutionGrantSigningKeyID         string
 	ExecutionIdentityVerifier          ExecutionIdentityVerifier
-	TrustedActionRef                   string
-	TrustedCLISHA256                   string
-	OutboxDispatcher                   interface{ Wake() }
+	// Compatibility gates; OIDC attests the protected workflow run, not an action or binary.
+	TrustedActionRef string
+	TrustedCLISHA256 string
+	OutboxDispatcher interface{ Wake() }
 }
 
 func (d DiggerController) GithubAppWebHook(c *gin.Context) {

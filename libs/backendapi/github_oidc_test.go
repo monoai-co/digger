@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,4 +90,41 @@ func TestGithubOIDCRejectsRedirectAndMalformedResponse(t *testing.T) {
 		})
 	}
 	require.Zero(t, followed.Load())
+}
+
+func TestExecutionClaimRetriesTruncatedCommittedResponse(t *testing.T) {
+	var attempts atomic.Int32
+	var original ExecutionClaimRequest
+	grant := ExecutionClaimResponse{Granted: true, ExecutionGrant: "persisted-grant", SigningKeyID: "key-v1", GrantExpiresAt: time.Now().Add(time.Hour)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request ExecutionClaimRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		if attempts.Add(1) == 1 {
+			original = request
+		} else {
+			require.Equal(t, original, request)
+		}
+		replay := grant
+		replay.AlreadyGranted = attempts.Load() > 1
+		require.NoError(t, json.NewEncoder(w).Encode(replay))
+	}))
+	t.Cleanup(server.Close)
+	client := *server.Client()
+	transport := client.Transport
+	client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		response, err := transport.RoundTrip(r)
+		if err == nil && attempts.Load() == 1 {
+			response.Body.Close()
+			response.Body = io.NopCloser(strings.NewReader(`{"granted":true,"execution_grant":`))
+		}
+		return response, err
+	})
+	api := &DiggerApi{DiggerHost: server.URL, HttpClient: &client}
+	receipt, err := api.ClaimProjectJobExecution("monoai-co/sre", "root", "job-1", ExecutionClaimRequest{RepositoryFullName: "monoai-co/sre", ProjectName: "root"})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), attempts.Load())
+	require.True(t, receipt.AlreadyGranted)
+	require.Equal(t, grant.ExecutionGrant, receipt.ExecutionGrant)
+	require.Equal(t, grant.SigningKeyID, receipt.SigningKeyID)
+	require.True(t, grant.GrantExpiresAt.Equal(receipt.GrantExpiresAt))
 }

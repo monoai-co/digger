@@ -125,38 +125,38 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", d.AuthToken))
 		response, requestErr := client.Do(req)
 		if requestErr == nil && response.StatusCode == http.StatusOK {
-			var receipt ExecutionClaimResponse
-			decoder := json.NewDecoder(response.Body)
-			if err := decoder.Decode(&receipt); err != nil {
-				response.Body.Close()
-				cancelRequest()
-				return nil, fmt.Errorf("decode execution claim response: %w", err)
-			}
+			receipt, decodeErr := decodeExecutionClaimResponse(response.Body)
 			response.Body.Close()
 			cancelRequest()
-			if !receipt.Granted || receipt.ExecutionGrant == "" {
-				return nil, fmt.Errorf("execution claim was not granted")
+			if decodeErr == nil {
+				if !receipt.Granted || receipt.ExecutionGrant == "" {
+					return nil, fmt.Errorf("execution claim was not granted")
+				}
+				if receipt.GrantExpiresAt.IsZero() || !receipt.GrantExpiresAt.After(time.Now()) {
+					return nil, fmt.Errorf("execution claim grant is already expired")
+				}
+				d.durableExecutionContext = &durableExecutionContext{
+					RepositoryFullName:  repo,
+					ProjectName:         projectName,
+					DiggerJobID:         jobID,
+					OperationID:         request.OperationID,
+					ProtocolVersion:     request.ProtocolVersion,
+					DispatchWriterEpoch: request.DispatchWriterEpoch,
+					ExecutionGrant:      receipt.ExecutionGrant,
+					GrantExpiresAt:      receipt.GrantExpiresAt,
+				}
+				return receipt, nil
 			}
-			if receipt.GrantExpiresAt.IsZero() || !receipt.GrantExpiresAt.After(time.Now()) {
-				return nil, fmt.Errorf("execution claim grant is already expired")
-			}
-			d.durableExecutionContext = &durableExecutionContext{
-				RepositoryFullName:  repo,
-				ProjectName:         projectName,
-				DiggerJobID:         jobID,
-				OperationID:         request.OperationID,
-				ProtocolVersion:     request.ProtocolVersion,
-				DispatchWriterEpoch: request.DispatchWriterEpoch,
-				ExecutionGrant:      receipt.ExecutionGrant,
-				GrantExpiresAt:      receipt.GrantExpiresAt,
-			}
-			return &receipt, nil
+			// The grant may have committed before its response was interrupted.
+			// Retry the same identity so the server can replay the persisted grant.
+			requestErr = decodeErr
+			response = nil
 		}
 		retryable := requestErr != nil
 		responseStatus := 0
 		if response != nil {
 			responseStatus = response.StatusCode
-			retryable = response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusServiceUnavailable
+			retryable = requestErr != nil || response.StatusCode == http.StatusTooEarly || response.StatusCode >= 500
 			response.Body.Close()
 		}
 		cancelRequest()
@@ -180,6 +180,22 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 			}
 		}
 	}
+}
+
+func decodeExecutionClaimResponse(body io.Reader) (*ExecutionClaimResponse, error) {
+	payload, err := io.ReadAll(io.LimitReader(body, 64*1024+1))
+	if err != nil || len(payload) > 64*1024 {
+		return nil, fmt.Errorf("execution claim response is incomplete or oversized")
+	}
+	var receipt ExecutionClaimResponse
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := decoder.Decode(&receipt); err != nil {
+		return nil, fmt.Errorf("execution claim response is incomplete or invalid")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("execution claim response contains trailing data")
+	}
+	return &receipt, nil
 }
 
 func (d *DiggerApi) githubOIDCToken(ctx context.Context, client *http.Client, audience string) (string, error) {
