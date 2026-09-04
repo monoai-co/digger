@@ -9,6 +9,10 @@
 - Set `GOWORK=off` when loading the backend GORM schema through Atlas because
   the provider invokes `go run -mod=mod`, which is incompatible with workspace
   mode in this repository.
+- Atlas `schema diff --include` requires Atlas Pro. Run the complete schema
+  diff for migration parity instead of filtering tables with that flag.
+- The GORM source represents a database. Omit `search_path` from the PostgreSQL
+  URL when comparing it; a schema-scoped URL cannot be diffed against that source.
 - The root is not a selected `go.work` module, so `go test ./...` fails there.
   Run it from each affected module directory, such as `backend`, `libs`, `cli`,
   or `ee/cli`.
