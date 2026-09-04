@@ -108,7 +108,6 @@ func (d DiggerApi) ClaimProjectJobExecution(repo string, projectName string, job
 		if requestErr == nil && response.StatusCode == http.StatusOK {
 			var receipt ExecutionClaimResponse
 			decoder := json.NewDecoder(response.Body)
-			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&receipt); err != nil {
 				response.Body.Close()
 				cancelRequest()

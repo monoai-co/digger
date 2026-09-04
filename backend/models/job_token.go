@@ -51,6 +51,8 @@ type DurableExecutionClaimReceipt struct {
 	Granted        bool
 	AlreadyGranted bool
 	ExecutionGrant string
+	SigningKeyID   string
+	GrantExpiresAt time.Time
 }
 
 type GithubWorkflowDispatchPayload struct {
@@ -587,11 +589,13 @@ func (db *Database) ClaimDurableJobExecution(
 	ctx context.Context,
 	request DurableExecutionClaimRequest,
 	jobTokenValue string,
-	grantSecret []byte,
+	grantSecrets map[string][]byte,
+	activeGrantSigningKeyID string,
 	databaseIdentity string,
 	writerEpoch int64,
 ) (*DurableExecutionClaimReceipt, error) {
-	if !validDurableExecutionClaimRequest(request) || jobTokenValue == "" || len(grantSecret) < 32 {
+	activeGrantSecret := grantSecrets[activeGrantSigningKeyID]
+	if !validDurableExecutionClaimRequest(request) || jobTokenValue == "" || len(activeGrantSecret) < 32 || !validGrantSigningKeyID(activeGrantSigningKeyID) {
 		return nil, ErrDurableJobDispatchClaim
 	}
 	var receipt *DurableExecutionClaimReceipt
@@ -636,14 +640,25 @@ func (db *Database) ClaimDurableJobExecution(
 		var existing ExecutionClaimAttempt
 		err = tx.First(&existing, "operation_id = ? AND run_id = ? AND run_attempt = ?", request.OperationID, request.RunID, request.RunAttempt).Error
 		if err == nil {
-			if !sameExecutionClaimIdentity(&existing, request) {
+			claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, existing.ExpectedWriterEpoch, existing.SigningKeyID, existing.GrantExpiresAt)
+			if err != nil {
+				return err
+			}
+			if !sameExecutionClaimIdentity(&existing, request, state.Job.ID, state.Token.ID, claimSHA256) {
 				return ErrDurableJobDispatchConflict
 			}
-			replayGrant := durableExecutionGrant(request, jobTokenValue, grantSecret, existing.ExpectedWriterEpoch)
+			replayGrantSecret := grantSecrets[existing.SigningKeyID]
+			if len(replayGrantSecret) < 32 {
+				return ErrDurableJobDispatchConflict
+			}
+			replayGrant := durableExecutionGrant(jobTokenValue, replayGrantSecret, existing.ClaimSHA256)
 			replayGrantDigest := sha256.Sum256([]byte(replayGrant))
 			if existing.State == ExecutionClaimGranted && existing.GrantTokenSHA256 == hex.EncodeToString(replayGrantDigest[:]) {
-				receipt = &DurableExecutionClaimReceipt{Granted: true, AlreadyGranted: true, ExecutionGrant: replayGrant}
+				receipt = &DurableExecutionClaimReceipt{Granted: true, AlreadyGranted: true, ExecutionGrant: replayGrant, SigningKeyID: existing.SigningKeyID, GrantExpiresAt: existing.GrantExpiresAt}
 				return nil
+			}
+			if existing.State == ExecutionClaimGranted {
+				return ErrDurableJobDispatchConflict
 			}
 			receipt = &DurableExecutionClaimReceipt{Granted: false}
 			return nil
@@ -651,7 +666,11 @@ func (db *Database) ClaimDurableJobExecution(
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		grant := durableExecutionGrant(request, jobTokenValue, grantSecret, writerEpoch)
+		claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, state.Token.Expiry)
+		if err != nil {
+			return err
+		}
+		grant := durableExecutionGrant(jobTokenValue, activeGrantSecret, claimSHA256)
 		grantDigest := sha256.Sum256([]byte(grant))
 		grantSHA256 := hex.EncodeToString(grantDigest[:])
 
@@ -659,7 +678,7 @@ func (db *Database) ClaimDurableJobExecution(
 		if err := tx.Model(&ExecutionClaimAttempt{}).Where("operation_id = ? AND state = ?", request.OperationID, ExecutionClaimGranted).Count(&grantedCount).Error; err != nil {
 			return err
 		}
-		claim := executionClaimAttempt(request, writerEpoch, now)
+		claim := executionClaimAttempt(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, state.Token.Expiry, claimSHA256, now)
 		if grantedCount > 0 {
 			claim.State = ExecutionClaimRejected
 			claim.RejectedAt = &now
@@ -685,7 +704,7 @@ func (db *Database) ClaimDurableJobExecution(
 		if result.RowsAffected != 1 {
 			return ErrDurableJobDispatchConflict
 		}
-		receipt = &DurableExecutionClaimReceipt{Granted: true, ExecutionGrant: grant}
+		receipt = &DurableExecutionClaimReceipt{Granted: true, ExecutionGrant: grant, SigningKeyID: activeGrantSigningKeyID, GrantExpiresAt: state.Token.Expiry}
 		return nil
 	})
 	return receipt, err
@@ -704,6 +723,10 @@ func validDurableExecutionClaimRequest(request DurableExecutionClaimRequest) boo
 		(validLowerHexDigest(request.WorkflowSHA, 40) || validLowerHexDigest(request.WorkflowSHA, sha256.Size*2))
 }
 
+func validGrantSigningKeyID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value
+}
+
 func validLowerHexDigest(value string, length int) bool {
 	if len(value) != length || value != strings.ToLower(value) {
 		return false
@@ -712,10 +735,13 @@ func validLowerHexDigest(value string, length int) bool {
 	return err == nil
 }
 
-func executionClaimAttempt(request DurableExecutionClaimRequest, writerEpoch int64, now time.Time) ExecutionClaimAttempt {
+func executionClaimAttempt(request DurableExecutionClaimRequest, jobDatabaseID uint, jobTokenID uint, writerEpoch int64, signingKeyID string, grantExpiresAt time.Time, claimSHA256 string, now time.Time) ExecutionClaimAttempt {
 	return ExecutionClaimAttempt{
 		ID:                  uuid.New(),
 		ControlOperationID:  request.OperationID,
+		DiggerJobID:         request.DiggerJobID,
+		DiggerJobDatabaseID: jobDatabaseID,
+		JobTokenID:          jobTokenID,
 		RunID:               request.RunID,
 		RunAttempt:          request.RunAttempt,
 		WorkflowRef:         request.WorkflowRef,
@@ -726,28 +752,76 @@ func executionClaimAttempt(request DurableExecutionClaimRequest, writerEpoch int
 		ExpectedWriterEpoch: writerEpoch,
 		DispatchWriterEpoch: request.DispatchWriterEpoch,
 		State:               ExecutionClaimPending,
+		ClaimSHA256:         claimSHA256,
+		SigningKeyID:        signingKeyID,
+		GrantExpiresAt:      grantExpiresAt,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
 }
 
-func sameExecutionClaimIdentity(existing *ExecutionClaimAttempt, request DurableExecutionClaimRequest) bool {
+func sameExecutionClaimIdentity(existing *ExecutionClaimAttempt, request DurableExecutionClaimRequest, jobDatabaseID uint, jobTokenID uint, claimSHA256 string) bool {
 	return existing != nil && existing.ControlOperationID == request.OperationID && existing.RunID == request.RunID &&
 		existing.RunAttempt == request.RunAttempt && existing.WorkflowRef == request.WorkflowRef && existing.WorkflowSHA == request.WorkflowSHA &&
 		existing.ActionRef == request.ActionRef && existing.CLISHA256 == request.CLISHA256 &&
-		existing.ProtocolVersion == request.ProtocolVersion && existing.DispatchWriterEpoch == request.DispatchWriterEpoch
+		existing.ProtocolVersion == request.ProtocolVersion && existing.DispatchWriterEpoch == request.DispatchWriterEpoch &&
+		existing.DiggerJobID == request.DiggerJobID && existing.DiggerJobDatabaseID == jobDatabaseID && existing.JobTokenID == jobTokenID &&
+		hmac.Equal([]byte(existing.ClaimSHA256), []byte(claimSHA256))
 }
 
-func durableExecutionGrant(request DurableExecutionClaimRequest, jobTokenValue string, grantSecret []byte, grantingWriterEpoch ...int64) string {
+type durableExecutionClaimIdentity struct {
+	OperationID         string `json:"operation_id"`
+	DiggerJobID         string `json:"digger_job_id"`
+	DiggerJobDatabaseID uint   `json:"digger_job_database_id"`
+	JobTokenID          uint   `json:"job_token_id"`
+	RepositoryFullName  string `json:"repository_full_name"`
+	ProjectName         string `json:"project_name"`
+	RunID               int64  `json:"run_id"`
+	RunAttempt          int64  `json:"run_attempt"`
+	WorkflowRef         string `json:"workflow_ref"`
+	WorkflowSHA         string `json:"workflow_sha"`
+	ActionRef           string `json:"action_ref"`
+	CLISHA256           string `json:"cli_sha256"`
+	ProtocolVersion     int    `json:"protocol_version"`
+	DispatchWriterEpoch int64  `json:"dispatch_writer_epoch"`
+	GrantingWriterEpoch int64  `json:"granting_writer_epoch"`
+	SigningKeyID        string `json:"signing_key_id"`
+	GrantExpiresAt      string `json:"grant_expires_at"`
+}
+
+func durableExecutionClaimSHA256(request DurableExecutionClaimRequest, jobDatabaseID uint, jobTokenID uint, grantingWriterEpoch int64, signingKeyID string, grantExpiresAt time.Time) (string, error) {
+	identity := durableExecutionClaimIdentity{
+		OperationID:         request.OperationID,
+		DiggerJobID:         request.DiggerJobID,
+		DiggerJobDatabaseID: jobDatabaseID,
+		JobTokenID:          jobTokenID,
+		RepositoryFullName:  request.RepositoryFullName,
+		ProjectName:         request.ProjectName,
+		RunID:               request.RunID,
+		RunAttempt:          request.RunAttempt,
+		WorkflowRef:         request.WorkflowRef,
+		WorkflowSHA:         request.WorkflowSHA,
+		ActionRef:           request.ActionRef,
+		CLISHA256:           request.CLISHA256,
+		ProtocolVersion:     request.ProtocolVersion,
+		DispatchWriterEpoch: request.DispatchWriterEpoch,
+		GrantingWriterEpoch: grantingWriterEpoch,
+		SigningKeyID:        signingKeyID,
+		GrantExpiresAt:      grantExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
+	serializedIdentity, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("marshal durable execution claim identity: %w", err)
+	}
+	digest := sha256.Sum256(serializedIdentity)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func durableExecutionGrant(jobTokenValue string, grantSecret []byte, claimSHA256 string) string {
 	mac := hmac.New(sha256.New, grantSecret)
 	mac.Write([]byte("digger-execution-grant\x00"))
 	mac.Write([]byte(jobTokenValue))
 	mac.Write([]byte("\x00"))
-	mac.Write([]byte(request.OperationID))
-	currentWriterEpoch := request.DispatchWriterEpoch
-	if len(grantingWriterEpoch) == 1 {
-		currentWriterEpoch = grantingWriterEpoch[0]
-	}
-	mac.Write([]byte(fmt.Sprintf("\x00%d\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d", request.RunID, request.RunAttempt, request.WorkflowRef, request.WorkflowSHA, request.ActionRef, request.CLISHA256, request.ProtocolVersion, request.DispatchWriterEpoch, currentWriterEpoch)))
+	mac.Write([]byte(claimSHA256))
 	return hex.EncodeToString(mac.Sum(nil))
 }

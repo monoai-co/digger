@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -28,7 +29,12 @@ import (
 const (
 	durableGraphTestDatabaseIdentity = "durable-graph-test"
 	durableGraphTestWriterEpoch      = int64(7)
+	durableGraphTestGrantSigningKey  = "durable-graph-test-key-v1"
 )
+
+func durableGraphTestGrantSecrets(secret []byte) map[string][]byte {
+	return map[string][]byte{durableGraphTestGrantSigningKey: secret}
+}
 
 func newDurableGraphTestDatabase(t *testing.T) (*models.Database, *models.Organisation, *models.GithubWebhookDelivery) {
 	t.Helper()
@@ -223,31 +229,40 @@ func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
 	job, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
 	secret := []byte(strings.Repeat("grant-secret-", 3))
 
-	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.NoError(t, err)
 	require.True(t, receipt.Granted)
 	require.False(t, receipt.AlreadyGranted)
 	require.NotEmpty(t, receipt.ExecutionGrant)
+	require.Equal(t, durableGraphTestGrantSigningKey, receipt.SigningKeyID)
+	require.False(t, receipt.GrantExpiresAt.IsZero())
 
-	replay, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	replay, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.NoError(t, err)
 	require.True(t, replay.Granted)
 	require.True(t, replay.AlreadyGranted)
 	require.Equal(t, receipt.ExecutionGrant, replay.ExecutionGrant)
+	require.Equal(t, receipt.SigningKeyID, replay.SigningKeyID)
+	require.Equal(t, receipt.GrantExpiresAt, replay.GrantExpiresAt)
+
+	_, err = database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets([]byte(strings.Repeat("different-secret-", 3))), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchConflict)
+	_, err = database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets(secret), "durable-graph-test-key-v2", durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 
 	changed := request
 	changed.WorkflowRef += "-tampered"
-	_, err = database.ClaimDurableJobExecution(context.Background(), changed, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	_, err = database.ClaimDurableJobExecution(context.Background(), changed, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.ErrorIs(t, err, models.ErrDurableJobDispatchConflict)
 
 	competitor := request
 	competitor.RunID++
-	rejected, err := database.ClaimDurableJobExecution(context.Background(), competitor, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	rejected, err := database.ClaimDurableJobExecution(context.Background(), competitor, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.NoError(t, err)
 	require.False(t, rejected.Granted)
 
 	for _, invalidToken := range []string{"cli:wrong", ""} {
-		_, err = database.ClaimDurableJobExecution(context.Background(), request, invalidToken, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+		_, err = database.ClaimDurableJobExecution(context.Background(), request, invalidToken, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 		require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 	}
 	var storedJob models.DiggerJob
@@ -259,6 +274,18 @@ func TestClaimDurableJobExecutionIsExactAndReplayable(t *testing.T) {
 	require.Len(t, attempts, 2)
 	require.Equal(t, models.ExecutionClaimGranted, attempts[0].State)
 	require.Equal(t, models.ExecutionClaimRejected, attempts[1].State)
+	for _, attempt := range attempts {
+		require.Equal(t, job.DiggerJobID, attempt.DiggerJobID)
+		require.Equal(t, job.ID, attempt.DiggerJobDatabaseID)
+		require.Equal(t, durableGraphTestGrantSigningKey, attempt.SigningKeyID)
+		require.Len(t, attempt.ClaimSHA256, sha256.Size*2)
+		require.Equal(t, receipt.GrantExpiresAt, attempt.GrantExpiresAt)
+	}
+	require.Len(t, attempts[0].GrantTokenSHA256, sha256.Size*2)
+	require.Empty(t, attempts[1].GrantTokenSHA256)
+	var storedToken models.JobToken
+	require.NoError(t, database.GormDB.First(&storedToken, "digger_job_database_id = ?", job.ID).Error)
+	require.Equal(t, storedToken.ID, attempts[0].JobTokenID)
 }
 
 func TestPostgresClaimDurableJobExecutionGrantsOnlyOneRun(t *testing.T) {
@@ -277,7 +304,7 @@ func TestPostgresClaimDurableJobExecutionGrantsOnlyOneRun(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			receipt, err := database.ClaimDurableJobExecution(context.Background(), claim, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+			receipt, err := database.ClaimDurableJobExecution(context.Background(), claim, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 			if err != nil {
 				errorsByWorker <- err
 				return
@@ -305,12 +332,52 @@ func TestPostgresClaimDurableJobExecutionGrantsOnlyOneRun(t *testing.T) {
 	require.Equal(t, contenders-1, rejected)
 }
 
+func TestPostgresExecutionClaimAttemptRejectsMixedBindings(t *testing.T) {
+	database, organisation, delivery := newPostgresDurableGraphTestDatabase(t)
+	job, request, tokenValue := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+	secret := []byte(strings.Repeat("grant-secret-", 3))
+	_, err := database.ClaimDurableJobExecution(context.Background(), request, tokenValue, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	require.NoError(t, err)
+
+	var original models.ExecutionClaimAttempt
+	require.NoError(t, database.GormDB.First(&original, "operation_id = ? AND state = ?", request.OperationID, models.ExecutionClaimGranted).Error)
+	var otherJob models.DiggerJob
+	require.NoError(t, database.GormDB.Where("id <> ? AND operation_id IS NOT NULL", job.ID).First(&otherJob).Error)
+	var otherToken models.JobToken
+	require.NoError(t, database.GormDB.First(&otherToken, "digger_job_database_id = ?", otherJob.ID).Error)
+
+	rejectedAt := time.Now().UTC()
+	mixedJob := original
+	mixedJob.ID = uuid.New()
+	mixedJob.DiggerJobID = otherJob.DiggerJobID
+	mixedJob.RunID += 100
+	mixedJob.State = models.ExecutionClaimRejected
+	mixedJob.GrantTokenSHA256 = ""
+	mixedJob.GrantedAt = nil
+	mixedJob.RejectedAt = &rejectedAt
+	mixedJob.CreatedAt = rejectedAt
+	mixedJob.UpdatedAt = rejectedAt
+	require.Error(t, database.GormDB.Create(&mixedJob).Error)
+
+	mixedToken := original
+	mixedToken.ID = uuid.New()
+	mixedToken.JobTokenID = otherToken.ID
+	mixedToken.RunID += 101
+	mixedToken.State = models.ExecutionClaimRejected
+	mixedToken.GrantTokenSHA256 = ""
+	mixedToken.GrantedAt = nil
+	mixedToken.RejectedAt = &rejectedAt
+	mixedToken.CreatedAt = rejectedAt
+	mixedToken.UpdatedAt = rejectedAt
+	require.Error(t, database.GormDB.Create(&mixedToken).Error)
+}
+
 func TestClaimDurableJobExecutionRequiresCommittedDispatchAndExactRoute(t *testing.T) {
 	database, organisation, delivery := newDurableGraphTestDatabase(t)
 	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
 	secret := []byte(strings.Repeat("grant-secret-", 3))
 	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("operation_id = ?", request.OperationID).Update("status", models.OutboxEffectProcessing).Error)
-	_, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	_, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.ErrorIs(t, err, models.ErrDurableJobDispatchNotReady)
 	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("operation_id = ?", request.OperationID).Update("status", models.OutboxEffectSucceeded).Error)
 
@@ -323,7 +390,7 @@ func TestClaimDurableJobExecutionRequiresCommittedDispatchAndExactRoute(t *testi
 		t.Run(name, func(t *testing.T) {
 			changed := request
 			mutate(&changed)
-			_, err := database.ClaimDurableJobExecution(context.Background(), changed, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+			_, err := database.ClaimDurableJobExecution(context.Background(), changed, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 			require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
 		})
 	}
@@ -333,16 +400,25 @@ func TestClaimDurableJobExecutionReplaySurvivesWriterHandoff(t *testing.T) {
 	database, organisation, delivery := newDurableGraphTestDatabase(t)
 	_, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
 	secret := []byte(strings.Repeat("grant-secret-", 3))
-	first, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+	first, err := database.ClaimDurableJobExecution(context.Background(), request, token, durableGraphTestGrantSecrets(secret), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.NoError(t, err)
 
 	const targetEpoch = durableGraphTestWriterEpoch + 1
 	require.NoError(t, database.GormDB.Model(&models.ControlPlaneFence{}).Where("id = ?", models.ControlPlaneFenceSingletonID).Update("writer_epoch", targetEpoch).Error)
-	replayed, err := database.ClaimDurableJobExecution(context.Background(), request, token, secret, durableGraphTestDatabaseIdentity, targetEpoch)
+	rotatedSecrets := map[string][]byte{
+		durableGraphTestGrantSigningKey: secret,
+		"durable-graph-test-key-v2":     []byte(strings.Repeat("rotated-secret-", 3)),
+	}
+	replayed, err := database.ClaimDurableJobExecution(context.Background(), request, token, rotatedSecrets, "durable-graph-test-key-v2", durableGraphTestDatabaseIdentity, targetEpoch)
 	require.NoError(t, err)
 	require.True(t, replayed.Granted)
 	require.True(t, replayed.AlreadyGranted)
 	require.Equal(t, first.ExecutionGrant, replayed.ExecutionGrant)
+	require.Equal(t, durableGraphTestGrantSigningKey, replayed.SigningKeyID)
+	_, err = database.ClaimDurableJobExecution(context.Background(), request, token, map[string][]byte{
+		"durable-graph-test-key-v2": rotatedSecrets["durable-graph-test-key-v2"],
+	}, "durable-graph-test-key-v2", durableGraphTestDatabaseIdentity, targetEpoch)
+	require.ErrorIs(t, err, models.ErrDurableJobDispatchConflict)
 }
 
 func TestPostgresRecoveredDispatchCanClaimThroughNewWriterEpoch(t *testing.T) {
@@ -379,7 +455,7 @@ func TestPostgresRecoveredDispatchCanClaimThroughNewWriterEpoch(t *testing.T) {
 		ProtocolVersion:     operation.ProtocolVersion,
 		DispatchWriterEpoch: durableGraphTestWriterEpoch,
 	}
-	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token.Value, []byte(strings.Repeat("grant-secret-", 3)), durableGraphTestDatabaseIdentity, targetEpoch)
+	receipt, err := database.ClaimDurableJobExecution(context.Background(), request, token.Value, durableGraphTestGrantSecrets([]byte(strings.Repeat("grant-secret-", 3))), durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, targetEpoch)
 	require.NoError(t, err)
 	require.True(t, receipt.Granted)
 }

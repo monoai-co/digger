@@ -52,7 +52,7 @@ func TestDiggerApiClaimsExecutionAndForwardsGrantToStatusCallbacks(t *testing.T)
 				return
 			}
 			response.Header().Set("Content-Type", "application/json")
-			_, err := response.Write([]byte(`{"granted":true,"execution_grant":"execution-grant"}`))
+			_, err := response.Write([]byte(`{"granted":true,"execution_grant":"execution-grant","signing_key_id":"key-v1","grant_expires_at":"2099-01-01T00:00:00Z","future_additive_field":true}`))
 			require.NoError(t, err)
 		case "/repos/repo/projects/root/jobs/job-1/set-status":
 			statusSeen = true

@@ -29,7 +29,9 @@ type ExecutionClaimRequest struct {
 }
 
 type ExecutionClaimResponse struct {
-	Granted        bool   `json:"granted"`
-	AlreadyGranted bool   `json:"already_granted"`
-	ExecutionGrant string `json:"execution_grant"`
+	Granted        bool      `json:"granted"`
+	AlreadyGranted bool      `json:"already_granted"`
+	ExecutionGrant string    `json:"execution_grant"`
+	SigningKeyID   string    `json:"signing_key_id"`
+	GrantExpiresAt time.Time `json:"grant_expires_at"`
 }

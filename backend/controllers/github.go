@@ -42,7 +42,8 @@ type DiggerController struct {
 	GithubWebhookProcessor             githubWebhookAdmitter
 	ControlPlaneDatabaseIdentity       string
 	ControlPlaneWriterEpoch            int64
-	ExecutionGrantSecret               []byte
+	ExecutionGrantSecrets              map[string][]byte
+	ExecutionGrantSigningKeyID         string
 }
 
 func (d DiggerController) GithubAppWebHook(c *gin.Context) {

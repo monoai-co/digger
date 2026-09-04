@@ -72,11 +72,14 @@ type DiggerBatch struct {
 }
 
 type DiggerJob struct {
-	gorm.Model
-	DiggerJobID                  string  `gorm:"type:text;uniqueIndex:idx_digger_jobs_public_id"`
-	OperationID                  *string `gorm:"type:text;uniqueIndex:idx_digger_jobs_operation_id,where:operation_id IS NOT NULL"`
-	ProtocolVersion              int     `gorm:"type:integer;not null;default:1"`
-	StatusVersion                int64   `gorm:"not null;default:0"`
+	ID                           uint `gorm:"primarykey;uniqueIndex:idx_digger_jobs_exact_identity,priority:1"`
+	CreatedAt                    time.Time
+	UpdatedAt                    time.Time
+	DeletedAt                    gorm.DeletedAt `gorm:"index"`
+	DiggerJobID                  string         `gorm:"type:text;uniqueIndex:idx_digger_jobs_public_id;uniqueIndex:idx_digger_jobs_operation_public_id,priority:2;uniqueIndex:idx_digger_jobs_exact_identity,priority:3"`
+	OperationID                  *string        `gorm:"type:text;uniqueIndex:idx_digger_jobs_operation_id,where:operation_id IS NOT NULL;uniqueIndex:idx_digger_jobs_operation_public_id,priority:1;uniqueIndex:idx_digger_jobs_exact_identity,priority:2"`
+	ProtocolVersion              int            `gorm:"type:integer;not null;default:1"`
+	StatusVersion                int64          `gorm:"not null;default:0"`
 	WriterEpoch                  *int64
 	Operation                    *ControlOperation                      `gorm:"foreignKey:OperationID;references:OperationID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	Status                       orchestrator_scheduler.DiggerJobStatus `gorm:"index:idx_digger_jobs_status"`
@@ -117,14 +120,17 @@ type DiggerJobSummary struct {
 
 // These tokens will be pre
 type JobToken struct {
-	gorm.Model
-	Value               string `gorm:"uniqueIndex:idx_job_tokens_value,where:value IS NOT NULL"`
+	ID                  uint `gorm:"primarykey;uniqueIndex:idx_job_tokens_job_token_identity,priority:2"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	DeletedAt           gorm.DeletedAt `gorm:"index"`
+	Value               string         `gorm:"uniqueIndex:idx_job_tokens_value,where:value IS NOT NULL"`
 	Expiry              time.Time
 	ActivatedAt         *time.Time
 	RevokedAt           *time.Time
 	OrganisationID      uint
 	Organisation        Organisation
-	DiggerJobDatabaseID *uint      `gorm:"uniqueIndex:idx_job_tokens_digger_job_database_id,where:digger_job_database_id IS NOT NULL"`
+	DiggerJobDatabaseID *uint      `gorm:"uniqueIndex:idx_job_tokens_digger_job_database_id,where:digger_job_database_id IS NOT NULL;uniqueIndex:idx_job_tokens_job_token_identity,priority:1"`
 	DiggerJob           *DiggerJob `gorm:"foreignKey:DiggerJobDatabaseID;references:ID;belongsTo;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	Type                string     // AccessTokenType starts with j:
 }

@@ -2,7 +2,9 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/hmac"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -13,6 +15,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 
 	"github.com/diggerhq/digger/backend/config"
 	"github.com/diggerhq/digger/backend/logging"
@@ -123,7 +126,17 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	if writerEpoch, err := strconv.ParseInt(os.Getenv("DIGGER_CONTROL_PLANE_WRITER_EPOCH"), 10, 64); err == nil {
 		diggerController.ControlPlaneWriterEpoch = writerEpoch
 	}
-	diggerController.ExecutionGrantSecret = []byte(os.Getenv("DIGGER_EXECUTION_GRANT_SECRET"))
+	diggerController.ExecutionGrantSigningKeyID = os.Getenv("DIGGER_EXECUTION_GRANT_KEY_ID")
+	executionGrantSecrets, executionGrantSecretsErr := buildExecutionGrantSecrets(
+		diggerController.ExecutionGrantSigningKeyID,
+		os.Getenv("DIGGER_EXECUTION_GRANT_SECRET"),
+		os.Getenv("DIGGER_EXECUTION_GRANT_KEYRING"),
+	)
+	if executionGrantSecretsErr != nil {
+		slog.Error("Execution grant keyring configuration is invalid", "error", executionGrantSecretsErr)
+	} else {
+		diggerController.ExecutionGrantSecrets = executionGrantSecrets
+	}
 	githubWebhookProcessor := controllers.NewGithubWebhookProcessor(
 		models.DB,
 		diggerController.ProcessGithubWebhookDelivery,
@@ -300,6 +313,38 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	}
 
 	return r, githubWebhookProcessor
+}
+
+func buildExecutionGrantSecrets(activeKeyID string, activeSecret string, encodedKeyring string) (map[string][]byte, error) {
+	secrets := make(map[string][]byte)
+	if activeKeyID == "" && activeSecret == "" && encodedKeyring == "" {
+		return secrets, nil
+	}
+	if !validExecutionGrantKeyID(activeKeyID) || len(activeSecret) < 32 {
+		return nil, fmt.Errorf("the active execution grant key ID and secret must both be configured")
+	}
+	secrets[activeKeyID] = []byte(activeSecret)
+	if encodedKeyring == "" {
+		return secrets, nil
+	}
+	var retained map[string]string
+	if err := json.Unmarshal([]byte(encodedKeyring), &retained); err != nil {
+		return nil, fmt.Errorf("decode retained execution grant keyring: %w", err)
+	}
+	for keyID, secret := range retained {
+		if !validExecutionGrantKeyID(keyID) || len(secret) < 32 {
+			return nil, fmt.Errorf("retained execution grant key %q is invalid", keyID)
+		}
+		if existing, exists := secrets[keyID]; exists && !hmac.Equal(existing, []byte(secret)) {
+			return nil, fmt.Errorf("retained execution grant key %q conflicts with the active key", keyID)
+		}
+		secrets[keyID] = []byte(secret)
+	}
+	return secrets, nil
+}
+
+func validExecutionGrantKeyID(value string) bool {
+	return value != "" && len(value) <= 128 && strings.TrimSpace(value) == value
 }
 
 func githubWebhookProcessorConfig() controllers.GithubWebhookProcessorConfig {

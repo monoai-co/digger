@@ -77,6 +77,11 @@ type ExecutionClaimAttempt struct {
 	ID                  uuid.UUID           `gorm:"type:uuid;primaryKey"`
 	ControlOperationID  string              `gorm:"column:operation_id;type:text;not null;uniqueIndex:idx_execution_claimant,priority:1;uniqueIndex:idx_execution_claim_granted_operation,where:state = 'granted'"`
 	Operation           *ControlOperation   `gorm:"foreignKey:ControlOperationID;references:OperationID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	DiggerJobID         string              `gorm:"type:text;not null"`
+	DiggerJobDatabaseID uint                `gorm:"not null;check:execution_claim_attempts_positive_ids_check,digger_job_database_id > 0 AND job_token_id > 0 AND run_id > 0 AND run_attempt > 0 AND protocol_version > 0"`
+	ExactJob            *DiggerJob          `gorm:"foreignKey:DiggerJobDatabaseID,ControlOperationID,DiggerJobID;references:ID,OperationID,DiggerJobID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	JobTokenID          uint                `gorm:"not null"`
+	ExactJobToken       *JobToken           `gorm:"foreignKey:DiggerJobDatabaseID,JobTokenID;references:DiggerJobDatabaseID,ID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	RunID               int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:2"`
 	RunAttempt          int64               `gorm:"not null;uniqueIndex:idx_execution_claimant,priority:3"`
 	WorkflowRef         string              `gorm:"type:text;not null"`
@@ -87,8 +92,11 @@ type ExecutionClaimAttempt struct {
 	ExpectedWriterEpoch int64               `gorm:"not null"`
 	DispatchWriterEpoch int64               `gorm:"not null;check:execution_claim_attempts_epochs_check,dispatch_writer_epoch > 0 AND expected_writer_epoch > 0"`
 	State               ExecutionClaimState `gorm:"type:text;not null;default:pending;check:execution_claim_attempts_state_check,state IN ('pending','granted','rejected')"`
-	GrantTokenSHA256    string              `gorm:"type:text"`
-	GrantedAt           *time.Time
+	ClaimSHA256         string              `gorm:"type:text;not null;check:execution_claim_attempts_claim_digest_check,length(claim_sha256) = 64 AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(claim_sha256,'0',''),'1',''),'2',''),'3',''),'4',''),'5',''),'6',''),'7',''),'8',''),'9',''),'a',''),'b',''),'c',''),'d',''),'e',''),'f','')) = 0"`
+	SigningKeyID        string              `gorm:"type:text;not null;check:execution_claim_attempts_signing_key_check,length(signing_key_id) BETWEEN 1 AND 128 AND trim(signing_key_id) = signing_key_id"`
+	GrantTokenSHA256    string              `gorm:"type:text;not null;uniqueIndex:idx_execution_claim_grant_digest,where:state = 'granted';check:execution_claim_attempts_grant_digest_check,grant_token_sha256 = '' OR (length(grant_token_sha256) = 64 AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(grant_token_sha256,'0',''),'1',''),'2',''),'3',''),'4',''),'5',''),'6',''),'7',''),'8',''),'9',''),'a',''),'b',''),'c',''),'d',''),'e',''),'f','')) = 0)"`
+	GrantExpiresAt      time.Time           `gorm:"not null;check:execution_claim_attempts_grant_expiry_check,grant_expires_at > created_at AND (granted_at IS NULL OR grant_expires_at > granted_at)"`
+	GrantedAt           *time.Time          `gorm:"check:execution_claim_attempts_lifecycle_check,(state = 'granted' AND grant_token_sha256 <> '' AND granted_at IS NOT NULL AND rejected_at IS NULL) OR (state = 'rejected' AND grant_token_sha256 = '' AND granted_at IS NULL AND rejected_at IS NOT NULL) OR (state = 'pending' AND grant_token_sha256 = '' AND granted_at IS NULL AND rejected_at IS NULL)"`
 	RejectedAt          *time.Time
 	CreatedAt           time.Time `gorm:"not null"`
 	UpdatedAt           time.Time `gorm:"not null"`

@@ -25,7 +25,8 @@ type claimJobExecutionRequest struct {
 }
 
 func (d DiggerController) ClaimJobExecution(c *gin.Context) {
-	if strings.TrimSpace(d.ControlPlaneDatabaseIdentity) == "" || d.ControlPlaneWriterEpoch <= 0 || len(d.ExecutionGrantSecret) < 32 {
+	activeGrantSecret := d.ExecutionGrantSecrets[d.ExecutionGrantSigningKeyID]
+	if strings.TrimSpace(d.ControlPlaneDatabaseIdentity) == "" || d.ControlPlaneWriterEpoch <= 0 || len(activeGrantSecret) < 32 || strings.TrimSpace(d.ExecutionGrantSigningKeyID) == "" {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "durable execution claims are not configured"})
 		return
 	}
@@ -56,7 +57,7 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		CLISHA256:           request.CLISHA256,
 		ProtocolVersion:     request.ProtocolVersion,
 		DispatchWriterEpoch: request.DispatchWriterEpoch,
-	}, jobTokenValue, d.ExecutionGrantSecret, d.ControlPlaneDatabaseIdentity, d.ControlPlaneWriterEpoch)
+	}, jobTokenValue, d.ExecutionGrantSecrets, d.ExecutionGrantSigningKeyID, d.ControlPlaneDatabaseIdentity, d.ControlPlaneWriterEpoch)
 	if err != nil {
 		switch {
 		case errors.Is(err, models.ErrControlPlaneHold), errors.Is(err, models.ErrControlPlaneDrain), errors.Is(err, models.ErrControlPlaneFenced):
@@ -77,8 +78,10 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"granted":         true,
-		"already_granted": receipt.AlreadyGranted,
-		"execution_grant": receipt.ExecutionGrant,
+		"granted":          true,
+		"already_granted":  receipt.AlreadyGranted,
+		"execution_grant":  receipt.ExecutionGrant,
+		"signing_key_id":   receipt.SigningKeyID,
+		"grant_expires_at": receipt.GrantExpiresAt,
 	})
 }
