@@ -20,6 +20,18 @@ func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken
 	slog.Info("TriggerGithubWorkflow", "repoOwner", spec.VCS.RepoOwner, "repoName", spec.VCS.RepoName, "commentId", spec.CommentId)
 	client := g.Client
 	specBytes, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("marshal workflow specification: %w", err)
+	}
+
+	repository, _, err := client.Repositories.Get(context.Background(), spec.VCS.RepoOwner, spec.VCS.RepoName)
+	if err != nil {
+		return fmt.Errorf("resolve repository control ref: %w", err)
+	}
+	controlRef := repository.GetDefaultBranch()
+	if controlRef == "" {
+		return fmt.Errorf("resolve repository control ref: default branch is empty")
+	}
 
 	inputs := orchestrator_scheduler.WorkflowInput{
 		Spec:    string(specBytes),
@@ -27,7 +39,7 @@ func (g GithubActionCi) TriggerWorkflow(spec spec.Spec, runName string, vcsToken
 	}
 
 	_, err = client.Actions.CreateWorkflowDispatchEventByFileName(context.Background(), spec.VCS.RepoOwner, spec.VCS.RepoName, spec.VCS.WorkflowFile, github.CreateWorkflowDispatchEventRequest{
-		Ref:    spec.Job.Branch,
+		Ref:    controlRef,
 		Inputs: inputs.ToMap(),
 	})
 
