@@ -135,7 +135,7 @@ func RunSpec(
 		reportError(spec, backendApi, message, err)
 	}
 
-	reporter, err := reporterProvider.GetReporter(fmt.Sprintf("%v for %v", spec.Job.JobType, job.GetProjectAlias()), spec.Reporter, prService, *spec.Job.PullRequestNumber, spec.VCS.VcsType)
+	reporter, err := reporterProvider.GetReporter(fmt.Sprintf("%v for %v", spec.Job.JobType, job.GetProjectAlias()), reporterSpecForExecution(spec), prService, *spec.Job.PullRequestNumber, spec.VCS.VcsType)
 	if err != nil {
 		message := fmt.Sprintf("could not get reporter: %v", err)
 		reportError(spec, backendApi, message, err)
@@ -148,7 +148,7 @@ func RunSpec(
 	}
 
 	// TODO: render mode being passable from the spec as a string
-	commentUpdater, err := commentUpdaterProvider.Get(spec.CommentUpdater.CommentUpdaterType)
+	commentUpdater, err := commentUpdaterForExecution(spec, commentUpdaterProvider)
 	if err != nil {
 		message := fmt.Sprintf("could not get comment updater: %v", err)
 		reportError(spec, backendApi, message, err)
@@ -210,4 +210,19 @@ func RunSpec(
 	usage.ReportErrorAndExit(spec.VCS.RepoOwner, "Digger finished successfully", 0)
 
 	return nil
+}
+
+func reporterSpecForExecution(jobSpec spec.Spec) spec.ReporterSpec {
+	reporter := jobSpec.Reporter
+	if jobSpec.OperationID != "" {
+		reporter.ReporterType = "noop"
+	}
+	return reporter
+}
+
+func commentUpdaterForExecution(jobSpec spec.Spec, provider comment_summary.CommentUpdaterProvider) (comment_summary.CommentUpdater, error) {
+	if jobSpec.OperationID != "" {
+		return comment_summary.NoopCommentUpdater{}, nil
+	}
+	return provider.Get(jobSpec.CommentUpdater.CommentUpdaterType)
 }

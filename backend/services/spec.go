@@ -218,6 +218,14 @@ func GetSpecFromJob(job models.DiggerJob) (*spec.Spec, error) {
 		},
 	}
 
+	if job.OperationID != nil {
+		// Durable jobs report through authenticated callbacks and the outbox.
+		// Keep legacy reporter choices in the stored graph, not in the CLI path.
+		spec.Reporter.ReporterType = "noop"
+		spec.CommentUpdater.CommentUpdaterType = "noop"
+		spec.CommentId = ""
+	}
+
 	slog.Debug("Successfully created spec",
 		"jobId", job.DiggerJobID,
 		slog.Group("spec",

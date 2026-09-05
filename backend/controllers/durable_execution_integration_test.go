@@ -124,12 +124,22 @@ func (provider *durableExecutionIntegrationProvider) roundTrip(request *http.Req
 			OperationID     string `json:"operation_id"`
 			ProtocolVersion int    `json:"protocol_version"`
 			WriterEpoch     int64  `json:"writer_epoch"`
+			CommentID       string `json:"comment_id"`
+			Reporter        struct {
+				ReporterType string `json:"reporter_type"`
+			} `json:"reporter"`
+			CommentUpdater struct {
+				Type string `json:"comment_updater_type"`
+			} `json:"comment_updater"`
 		}
 		if err := json.Unmarshal([]byte(rawSpec), &workflowSpec); err != nil {
 			return nil, fmt.Errorf("decode workflow specification: %w", err)
 		}
 		if !operation.ID(workflowSpec.OperationID).Valid() || workflowSpec.ProtocolVersion != operation.ProtocolVersion || workflowSpec.WriterEpoch != durableExecutionIntegrationWriterEpoch {
 			return nil, fmt.Errorf("workflow dispatch carried the wrong durable identity")
+		}
+		if workflowSpec.Reporter.ReporterType != "noop" || workflowSpec.CommentUpdater.Type != "noop" || workflowSpec.CommentID != "" {
+			return nil, fmt.Errorf("durable workflow dispatch enabled CLI provider reporting")
 		}
 		runID := int64(900 + provider.dispatches.Add(1))
 		return response(fmt.Sprintf(`{"workflow_run_id":%d}`, runID)), nil
