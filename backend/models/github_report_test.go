@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,65 @@ func githubReportCheckFixture() GithubReportCreatePayload {
 		RepoOwner: "owner", RepoName: "repo", PullRequestNumber: 4, HeadSHA: "commit",
 		ResourceKind: GithubReportResourceCheckRun,
 		Check:        &GithubReportCheck{Name: "plan", Status: "queued", Title: "Plan"}}
+}
+
+func TestGithubReportPreparationBoundsTextBeforeFreezing(t *testing.T) {
+	for _, text := range []string{strings.Repeat("x", GithubReportTextMaxBytes), strings.Repeat("界🙂", GithubReportTextMaxBytes)} {
+		payload := githubReportCheckFixture()
+		payload.Check.Summary, payload.Check.Text = text, text
+		raw, err := PrepareGithubReportCreatePayload(payload)
+		require.NoError(t, err)
+		require.Equal(t, text, payload.Check.Text, "preparation must not mutate caller-owned checks")
+		prepared, err := DecodeGithubReportCreatePayload(raw)
+		require.NoError(t, err)
+		require.True(t, utf8.ValidString(prepared.Check.Text))
+		require.LessOrEqual(t, len(prepared.Check.Text), GithubReportTextMaxBytes)
+		require.Equal(t, prepared.Check.Summary, prepared.Check.Text)
+		if len(text) > GithubReportTextMaxBytes {
+			require.True(t, strings.HasSuffix(prepared.Check.Text, githubReportTruncatedSuffix))
+		} else {
+			require.Equal(t, text, prepared.Check.Text)
+		}
+		replayed, err := PrepareGithubReportCreatePayload(prepared)
+		require.NoError(t, err)
+		require.Equal(t, raw, replayed)
+		payload.ResourceKind, payload.Check, payload.HeadSHA, payload.Body = GithubReportResourceComment, nil, "", text
+		raw, err = PrepareGithubReportCreatePayload(payload)
+		require.NoError(t, err)
+		prepared, err = DecodeGithubReportCreatePayload(raw)
+		require.NoError(t, err)
+		require.True(t, utf8.ValidString(prepared.Body))
+		require.LessOrEqual(t, len(prepared.Body), GithubReportTextMaxBytes)
+	}
+}
+
+func TestGithubReportFrozenPayloadCannotSilentlyTrim(t *testing.T) {
+	for _, field := range []string{"body", "summary", "text", "name", "title"} {
+		payload := githubReportCheckFixture()
+		oversized := strings.Repeat("x", GithubReportTextMaxBytes+1)
+		switch field {
+		case "body":
+			payload.ResourceKind, payload.Check, payload.HeadSHA, payload.Body = GithubReportResourceComment, nil, "", oversized
+		case "summary":
+			payload.Check.Summary = oversized
+		case "text":
+			payload.Check.Text = oversized
+		case "name":
+			payload.Check.Name = strings.Repeat("x", GithubReportLabelMaxBytes+1)
+		case "title":
+			payload.Check.Title = strings.Repeat("x", GithubReportLabelMaxBytes+1)
+		}
+		_, err := CanonicalGithubReportCreatePayload(payload)
+		require.ErrorIs(t, err, ErrGithubReportCreatePayload)
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		_, err = DecodeGithubReportCreatePayload(raw)
+		require.ErrorIs(t, err, ErrGithubReportCreatePayload)
+	}
+	payload := githubReportCheckFixture()
+	payload.Check.Text = strings.Repeat("x", GithubReportTextMaxBytes+1) + string([]byte{0xff})
+	_, err := PrepareGithubReportCreatePayload(payload)
+	require.ErrorIs(t, err, ErrGithubReportCreatePayload, "invalid UTF-8 beyond the cutoff must still fail")
 }
 
 func TestGithubReportCreateCanonicalPayload(t *testing.T) {

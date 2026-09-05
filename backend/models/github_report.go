@@ -24,6 +24,13 @@ const (
 // GithubReportCreateMaxBytes is the local contract bound, not a provider limit.
 const GithubReportCreateMaxBytes = 1 << 20
 
+// Local UTF-8 byte budgets leave room for the comment correlation marker and
+// remain below GitHub check output limits, including multibyte content.
+const GithubReportTextMaxBytes = 60 * 1024
+const GithubReportLabelMaxBytes = 255
+
+const githubReportTruncatedSuffix = "\n\n[Report truncated.]"
+
 var ErrGithubReportCreatePayload = errors.New("github report create payload is invalid")
 var ErrGithubReportCreateCorrelation = errors.New("github report create correlation identity is invalid")
 
@@ -109,6 +116,36 @@ func CanonicalGithubReportCreatePayload(payload GithubReportCreatePayload) ([]by
 	return canonical, nil
 }
 
+// PrepareGithubReportCreatePayload bounds rendered text before its identity is
+// frozen. Canonical decoding and dispatch never truncate persisted payloads.
+func PrepareGithubReportCreatePayload(payload GithubReportCreatePayload) ([]byte, error) {
+	if !utf8.ValidString(payload.Body) {
+		return nil, ErrGithubReportCreatePayload
+	}
+	payload.Body = boundedGithubReportText(payload.Body)
+	if payload.Check != nil {
+		check := *payload.Check
+		if !utf8.ValidString(check.Summary) || !utf8.ValidString(check.Text) {
+			return nil, ErrGithubReportCreatePayload
+		}
+		check.Summary = boundedGithubReportText(check.Summary)
+		check.Text = boundedGithubReportText(check.Text)
+		payload.Check = &check
+	}
+	return CanonicalGithubReportCreatePayload(payload)
+}
+
+func boundedGithubReportText(value string) string {
+	if len(value) <= GithubReportTextMaxBytes {
+		return value
+	}
+	end := GithubReportTextMaxBytes - len(githubReportTruncatedSuffix)
+	for !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + githubReportTruncatedSuffix
+}
+
 func validateGithubReportCreatePayload(payload GithubReportCreatePayload) error {
 	if payload.OrganisationID == 0 || payload.GithubAppID <= 0 || payload.GithubInstallationID <= 0 ||
 		payload.PullRequestNumber <= 0 || !validGithubReportPathSegment(payload.RepoOwner) || !validGithubReportPathSegment(payload.RepoName) ||
@@ -117,7 +154,7 @@ func validateGithubReportCreatePayload(payload GithubReportCreatePayload) error 
 	}
 	switch payload.ResourceKind {
 	case GithubReportResourceComment:
-		if payload.Check != nil || strings.TrimSpace(payload.Body) == "" || payload.HeadSHA != "" {
+		if payload.Check != nil || strings.TrimSpace(payload.Body) == "" || payload.HeadSHA != "" || len(payload.Body) > GithubReportTextMaxBytes {
 			return ErrGithubReportCreatePayload
 		}
 	case GithubReportResourceCheckRun:
@@ -126,6 +163,7 @@ func validateGithubReportCreatePayload(payload GithubReportCreatePayload) error 
 		}
 		check := payload.Check
 		if strings.TrimSpace(check.Name) == "" || strings.TrimSpace(check.Title) == "" || len(check.Actions) > 3 ||
+			len(check.Name) > GithubReportLabelMaxBytes || len(check.Title) > GithubReportLabelMaxBytes || len(check.Summary) > GithubReportTextMaxBytes || len(check.Text) > GithubReportTextMaxBytes ||
 			!utf8.ValidString(check.Name) || !utf8.ValidString(check.Title) || !utf8.ValidString(check.Summary) || !utf8.ValidString(check.Text) {
 			return ErrGithubReportCreatePayload
 		}

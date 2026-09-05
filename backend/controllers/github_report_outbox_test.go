@@ -28,6 +28,15 @@ type reportTestStore struct {
 	calls    int
 }
 
+func TestGithubReportCommentBudgetIncludesCorrelationMarker(t *testing.T) {
+	correlation, err := models.GithubReportCreateCorrelation(uuid.New(), strings.Repeat("a", 64))
+	require.NoError(t, err)
+	body := strings.Repeat("x", models.GithubReportTextMaxBytes)
+	posted := githubReportCommentBody(body, correlation)
+	require.Less(t, len(posted), 65535)
+	require.Equal(t, body+"\n\n<!-- "+correlation+" -->", posted)
+}
+
 func (s *reportTestStore) PrepareGithubReportCreate(_ context.Context, id uuid.UUID, _, _ string, _ int64) (*models.GithubReportCreatePreparation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
