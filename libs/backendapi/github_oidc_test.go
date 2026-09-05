@@ -138,7 +138,7 @@ func TestExecutionClaimUsesPersistedDeadlineAndRetriesOIDCOutage(t *testing.T) {
 	api := &DiggerApi{DiggerHost: "https://unused.test", oidcTokenProvider: func(ctx context.Context, _ string) (string, error) {
 		actual, ok := ctx.Deadline()
 		require.True(t, ok)
-		require.True(t, deadline.Equal(actual))
+		require.True(t, deadline.Add(executionClaimReplayGrace).Equal(actual))
 		if calls.Add(1) == 2 {
 			cancel()
 		}
@@ -160,4 +160,31 @@ func TestExecutionClaimRejectsExpiredDeadlineBeforeRequestingOIDC(t *testing.T) 
 		RepositoryFullName: "monoai-co/sre", ProjectName: "root", ProtocolVersion: 2, ClaimExpiresAt: time.Now().Add(-time.Second),
 	})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestExecutionClaimReplaysLostGrantAfterInitialCutoff(t *testing.T) {
+	cutoff := time.Now().Add(time.Second)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			require.True(t, time.Now().Before(cutoff), "initial grant must commit before cutoff")
+			timer := time.NewTimer(time.Until(cutoff.Add(20 * time.Millisecond)))
+			defer timer.Stop()
+			<-timer.C
+			_, err := w.Write([]byte(`{"granted":`))
+			require.NoError(t, err)
+			return
+		}
+		require.True(t, time.Now().After(cutoff))
+		require.NoError(t, json.NewEncoder(w).Encode(ExecutionClaimResponse{Granted: true, AlreadyGranted: true, ExecutionGrant: "committed-before-cutoff", GrantExpiresAt: time.Now().Add(time.Hour)}))
+	}))
+	t.Cleanup(server.Close)
+	api := &DiggerApi{DiggerHost: server.URL, HttpClient: server.Client(), oidcTokenProvider: func(context.Context, string) (string, error) { return "fresh-oidc", nil }}
+	receipt, err := api.ClaimProjectJobExecution("monoai-co/sre", "root", "job-1", ExecutionClaimRequest{
+		RepositoryFullName: "monoai-co/sre", ProjectName: "root", OperationID: "op1_" + strings.Repeat("a", 64), ProtocolVersion: 2, ClaimExpiresAt: cutoff,
+	})
+	require.NoError(t, err)
+	require.True(t, receipt.AlreadyGranted)
+	require.Equal(t, "committed-before-cutoff", receipt.ExecutionGrant)
+	require.Equal(t, int32(2), calls.Load())
 }

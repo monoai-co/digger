@@ -22,6 +22,8 @@ import (
 
 var errGithubOIDCUnavailable = errors.New("GitHub OIDC token service temporarily unavailable")
 
+const executionClaimReplayGrace = 5 * time.Minute
+
 func BuildExecutionClaimRequest(repositoryFullName string, projectName string, operationID string, protocolVersion int, writerEpoch int64) (ExecutionClaimRequest, error) {
 	runID, err := positiveEnvironmentInt64("GITHUB_RUN_ID")
 	if err != nil {
@@ -102,7 +104,12 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 		if request.ClaimExpiresAt.IsZero() {
 			return nil, fmt.Errorf("durable execution claim has no deadline")
 		}
-		deadline = request.ClaimExpiresAt
+		if !request.ClaimExpiresAt.After(time.Now()) {
+			return nil, context.DeadlineExceeded
+		}
+		// A response can be lost after the final allowed initial grant. Keep a
+		// bounded interval for replay; the server still rejects new late grants.
+		deadline = request.ClaimExpiresAt.Add(executionClaimReplayGrace)
 	}
 	ctx, cancelClaims := context.WithDeadline(ctx, deadline)
 	defer cancelClaims()
