@@ -33,6 +33,13 @@ func NewGithubWorkflowOutboxDispatch(
 		return nil, ErrGithubWorkflowOutboxDispatch
 	}
 	return func(ctx context.Context, request OutboxDispatchRequest) (OutboxDispatchResult, error) {
+		if request.EffectKind == models.GithubReportCreateEffectKind {
+			reports, ok := store.(githubReportCreateStore)
+			if !ok {
+				return OutboxDispatchResult{}, ErrOutboxDispatcherMisconfigured
+			}
+			return dispatchGithubReportCreate(ctx, request, reports, githubClientProvider)
+		}
 		if request.EffectKind == models.GithubWorkflowReconcileEffectKind {
 			reconciler, ok := store.(durableRunReconciliationStore)
 			if !ok {

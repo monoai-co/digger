@@ -366,11 +366,11 @@ func (d *OutboxDispatcher) renewLease(effectID uuid.UUID, leaseID string) (err e
 func (d *OutboxDispatcher) finishClaim(effect *models.OutboxEffect, leaseID string, outcome outboxDispatchOutcome) {
 	now := time.Now().UTC()
 	if outcome.err == nil && outcome.result.RetryAfter > 0 {
-		if effect.EffectKind != models.GithubWorkflowReconcileEffectKind || len(outcome.result.ProviderReceipt) != 0 {
+		if (effect.EffectKind != models.GithubWorkflowReconcileEffectKind && effect.EffectKind != models.GithubReportCreateEffectKind) || len(outcome.result.ProviderReceipt) != 0 {
 			outcome.err = ErrOutboxDispatchPermanent
 		} else {
 			if err := d.store.RetryOutboxEffect(context.Background(), effect.ID, leaseID, "", outcome.result.RetryAfter, now, d.config.DatabaseIdentity, d.config.WriterEpoch); err != nil {
-				slog.Error("Failed to defer workflow reconciliation", "effectID", effect.ID, "error", err)
+				slog.Error("Failed to defer provider reconciliation", "effectID", effect.ID, "error", err)
 			}
 			return
 		}
@@ -389,12 +389,17 @@ func (d *OutboxDispatcher) finishClaim(effect *models.OutboxEffect, leaseID stri
 
 	lastError := truncateOutboxError(outcome.err.Error())
 	if errors.Is(outcome.err, ErrOutboxDispatchPermanent) || effect.AttemptCount >= d.config.MaxAttempts {
-		if err := d.store.DeadLetterOutboxEffect(context.Background(), effect.ID, leaseID, lastError, now, d.config.DatabaseIdentity, d.config.WriterEpoch); err != nil {
+		err := d.store.DeadLetterOutboxEffect(context.Background(), effect.ID, leaseID, lastError, now, d.config.DatabaseIdentity, d.config.WriterEpoch)
+		if err == nil {
+			slog.Error("Outbox effect moved to dead letter", "effectID", effect.ID, "attempts", effect.AttemptCount, "error", lastError)
+			return
+		}
+		if !errors.Is(err, models.ErrGithubReportCreateConflict) {
 			slog.Error("Failed to dead-letter outbox effect", "effectID", effect.ID, "error", err)
 			return
 		}
-		slog.Error("Outbox effect moved to dead letter", "effectID", effect.ID, "attempts", effect.AttemptCount, "error", lastError)
-		return
+		// The database found a committed report-create permit. The POST may
+		// have succeeded; retain reconciliation instead of abandoning it.
 	}
 
 	retryDelay := d.retryDelay(effect.AttemptCount)

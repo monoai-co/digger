@@ -18,9 +18,9 @@
   or `ee/cli`.
 - This repository does not provide `scripts/check.sh`; run the affected module
   suites locally and use the existing CI jobs for repository-wide validation.
-- Outbox completion checks report-attempt history even for non-report effects.
-  Test database fixtures that complete outbox work must migrate
-  `GithubReportCreateAttempt` alongside `OutboxEffect`; missing this table leaves
+- Outbox completion and dead-letter transitions check report-attempt history
+  even for non-report effects. Test database fixtures that transition outbox work
+  must migrate `GithubReportCreateAttempt` alongside `OutboxEffect`; missing this table leaves
   dispatcher tests retrying rather than reaching completion.
 - For GORM relations whose foreign and referenced field names coincide, declare
   `belongsTo` explicitly. Otherwise AutoMigrate can infer the reverse foreign key;

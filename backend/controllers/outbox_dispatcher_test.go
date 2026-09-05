@@ -20,6 +20,64 @@ type completionFailureOutboxStore struct {
 	failed atomic.Bool
 }
 
+type reportOutcomeStore struct {
+	*models.Database
+	retried, completed, deadLettered bool
+	attempted                        bool
+}
+
+func (s *reportOutcomeStore) RetryOutboxEffect(context.Context, uuid.UUID, string, string, time.Duration, time.Time, string, int64) error {
+	s.retried = true
+	return nil
+}
+
+func (s *reportOutcomeStore) CompleteOutboxEffect(context.Context, uuid.UUID, string, []byte, time.Time, string, int64) error {
+	s.completed = true
+	return nil
+}
+
+func (s *reportOutcomeStore) DeadLetterOutboxEffect(context.Context, uuid.UUID, string, string, time.Time, string, int64) error {
+	if s.attempted {
+		return models.ErrGithubReportCreateConflict
+	}
+	s.deadLettered = true
+	return nil
+}
+
+func TestOutboxDispatcherRetainsUnknownReportPastMaxAttempts(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		outcome outboxDispatchOutcome
+	}{
+		{"poll", outboxDispatchOutcome{result: OutboxDispatchResult{RetryAfter: time.Minute}}},
+		{"provider unavailable", outboxDispatchOutcome{err: errors.New("provider unavailable")}},
+		{"permanent error", outboxDispatchOutcome{err: ErrOutboxDispatchPermanent}},
+		{"invalid receipt", outboxDispatchOutcome{result: OutboxDispatchResult{ProviderReceipt: json.RawMessage(`not-json`)}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &reportOutcomeStore{attempted: true}
+			dispatcher := newTestOutboxDispatcher(t, store, func(context.Context, OutboxDispatchRequest) (OutboxDispatchResult, error) {
+				return OutboxDispatchResult{}, nil
+			}, testOutboxDispatcherConfig())
+			dispatcher.finishClaim(&models.OutboxEffect{ID: uuid.New(), EffectKind: models.GithubReportCreateEffectKind, AttemptCount: 100}, "lease", test.outcome)
+			require.True(t, store.retried)
+			require.False(t, store.completed)
+			require.False(t, store.deadLettered)
+		})
+	}
+}
+
+func TestOutboxDispatcherDeadLettersUnattemptedReportAtMaxAttempts(t *testing.T) {
+	store := &reportOutcomeStore{}
+	dispatcher := newTestOutboxDispatcher(t, store, func(context.Context, OutboxDispatchRequest) (OutboxDispatchResult, error) {
+		return OutboxDispatchResult{}, nil
+	}, testOutboxDispatcherConfig())
+	dispatcher.finishClaim(&models.OutboxEffect{ID: uuid.New(), EffectKind: models.GithubReportCreateEffectKind, AttemptCount: 100}, "lease", outboxDispatchOutcome{err: ErrOutboxDispatchPermanent})
+	require.True(t, store.deadLettered)
+	require.False(t, store.retried)
+	require.False(t, store.completed)
+}
+
 func (s *completionFailureOutboxStore) CompleteOutboxEffect(ctx context.Context, effectID uuid.UUID, leaseID string, providerReceipt []byte, now time.Time, databaseIdentity string, writerEpoch int64) error {
 	if s.failed.CompareAndSwap(false, true) {
 		return errors.New("simulated completion commit failure")

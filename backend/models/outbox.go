@@ -273,7 +273,16 @@ func (db *Database) DeadLetterOutboxEffect(ctx context.Context, effectID uuid.UU
 			"status":           OutboxEffectDeadLetter,
 			"updated_at":       effectiveNow,
 		})
-	}, deadLetterDurableWorkflowDispatchTx, now)
+	}, func(tx *gorm.DB, effect *OutboxEffect, effectiveNow time.Time) error {
+		var attempts int64
+		if err := tx.Model(&GithubReportCreateAttempt{}).Where("effect_id = ?", effect.ID).Count(&attempts).Error; err != nil {
+			return err
+		}
+		if attempts != 0 {
+			return ErrGithubReportCreateConflict
+		}
+		return deadLetterDurableWorkflowDispatchTx(tx, effect, effectiveNow)
+	}, now)
 }
 
 func (db *Database) updateClaimedOutboxEffect(

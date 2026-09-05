@@ -68,6 +68,20 @@ func TestPostgresGithubReportAttemptOnlyFirstPreparationAllowsCreate(t *testing.
 	require.Equal(t, identity.WriterEpoch, attempt.WriterEpoch)
 }
 
+func TestPostgresGithubReportAttemptCannotBeDeadLettered(t *testing.T) {
+	database, identity, effect := newGithubReportAttemptFixture(t)
+	prepared, err := database.PrepareGithubReportCreate(context.Background(), effect.ID, effect.LeaseID, identity.DatabaseIdentity, identity.WriterEpoch)
+	require.NoError(t, err)
+	require.True(t, prepared.MayCreate)
+	err = database.DeadLetterOutboxEffect(context.Background(), effect.ID, effect.LeaseID, "provider unavailable", time.Now().UTC(), identity.DatabaseIdentity, identity.WriterEpoch)
+	require.ErrorIs(t, err, models.ErrGithubReportCreateConflict)
+	var stored models.OutboxEffect
+	require.NoError(t, database.GormDB.First(&stored, "id = ?", effect.ID).Error)
+	require.Equal(t, models.OutboxEffectProcessing, stored.Status)
+	require.Equal(t, effect.LeaseID, stored.LeaseID)
+	require.Empty(t, stored.ProviderReceipt)
+}
+
 func TestPostgresGithubReportAttemptConcurrencyGrantsOneCreate(t *testing.T) {
 	database, identity, effect := newGithubReportAttemptFixture(t)
 	var workers sync.WaitGroup
