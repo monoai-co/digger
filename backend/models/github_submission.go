@@ -29,11 +29,12 @@ type GithubSubmissionSource struct {
 }
 
 type GithubSubmissionIntent struct {
-	Graph      *DurableGraphIntent      `json:"graph"`
-	Sources    []GithubSubmissionSource `json:"sources"`
-	Reports    []GithubSubmissionReport `json:"reports"`
-	ReportOnly *GithubReportOnlyOutcome `json:"report_only,omitempty"`
-	Locks      *GithubSubmissionLocks   `json:"locks,omitempty"`
+	Graph      *DurableGraphIntent        `json:"graph"`
+	Sources    []GithubSubmissionSource   `json:"sources"`
+	Reports    []GithubSubmissionReport   `json:"reports"`
+	ReportOnly *GithubReportOnlyOutcome   `json:"report_only,omitempty"`
+	Locks      *GithubSubmissionLocks     `json:"locks,omitempty"`
+	Detection  *GithubSubmissionDetection `json:"detection,omitempty"`
 }
 
 type GithubSubmissionReport struct {
@@ -81,6 +82,9 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 		return intent, err
 	}
 	if err := normalizeGithubSubmissionLocks(intent.Locks); err != nil {
+		return intent, err
+	}
+	if err := normalizeGithubSubmissionDetection(intent.Detection); err != nil {
 		return intent, err
 	}
 	if intent.ReportOnly != nil {
@@ -255,6 +259,9 @@ func (db *Database) RecordGithubSubmission(ctx context.Context, identity JobCrea
 			return err
 		}
 		if err := applyGithubSubmissionLocks(tx, identity, delivery, orgID, normalized.Locks); err != nil {
+			return err
+		}
+		if err := recordGithubSubmissionDetection(tx, identity, delivery, orgID, normalized.Detection); err != nil {
 			return err
 		}
 		// VCS/organisation locks in envelope validation can wait past the lease.
