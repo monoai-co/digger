@@ -449,6 +449,7 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 		&models.GithubDiggerJobLink{},
 		&models.DiggerJobParentLink{},
 		&models.OutboxEffect{},
+		&models.GithubReportCreateAttempt{},
 		&models.ExecutionClaimAttempt{},
 		&models.JobStatusCallback{},
 		&models.ApplyRecovery{},

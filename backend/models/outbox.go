@@ -240,6 +240,9 @@ func (db *Database) CompleteOutboxEffect(ctx context.Context, effectID uuid.UUID
 			"updated_at":       effectiveNow,
 		})
 	}, func(tx *gorm.DB, effect *OutboxEffect, effectiveNow time.Time) error {
+		if err := completeGithubReportCreateTx(tx, effect, providerReceipt); err != nil {
+			return err
+		}
 		if err := completeDurableWorkflowDispatchTx(tx, effect, effectiveNow); err != nil {
 			return err
 		}

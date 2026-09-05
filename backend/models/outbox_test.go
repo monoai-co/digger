@@ -19,7 +19,7 @@ import (
 
 func newOutboxTestDatabase(t *testing.T) *Database {
 	database := newGithubWebhookDeliveryTestDatabase(t)
-	require.NoError(t, database.GormDB.AutoMigrate(&OutboxEffect{}))
+	require.NoError(t, database.GormDB.AutoMigrate(&OutboxEffect{}, &GithubReportCreateAttempt{}))
 	return database
 }
 
@@ -58,7 +58,7 @@ func newPostgresOutboxTestDatabase(t *testing.T) *Database {
 		require.NoError(t, adminSQLDB.Close())
 	})
 
-	require.NoError(t, gormDB.AutoMigrate(&ControlPlaneFence{}, &GithubWebhookOrderingDomain{}, &GithubWebhookDelivery{}, &GithubWebhookDeliveryRequeue{}, &ControlOperation{}, &OutboxEffect{}))
+	require.NoError(t, gormDB.AutoMigrate(&ControlPlaneFence{}, &GithubWebhookOrderingDomain{}, &GithubWebhookDelivery{}, &GithubWebhookDeliveryRequeue{}, &ControlOperation{}, &OutboxEffect{}, &GithubReportCreateAttempt{}))
 	require.NoError(t, gormDB.Create(&ControlPlaneFence{
 		ID:               ControlPlaneFenceSingletonID,
 		DatabaseIdentity: testControlPlaneDatabaseIdentity,

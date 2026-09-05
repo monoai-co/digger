@@ -29,6 +29,8 @@ func (db *Database) CheckDurableControlPlaneSchema(ctx context.Context) error {
 		{"status callbacks", &[]JobStatusCallback{}},
 		{"apply recoveries", &[]ApplyRecovery{}},
 		{"GitHub submissions", &[]GithubSubmission{}},
+		{"GitHub report attempts", &[]GithubReportCreateAttempt{}},
+		{"GitHub report receipts", &[]GithubReportReceipt{}},
 	}
 	for _, check := range checks {
 		if err := db.GormDB.WithContext(ctx).Session(&gorm.Session{QueryFields: true}).Where("1 = 0").Find(check.rows).Error; err != nil {

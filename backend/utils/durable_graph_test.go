@@ -101,6 +101,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		&models.GithubDiggerJobLink{},
 		&models.DiggerJobParentLink{},
 		&models.OutboxEffect{},
+		&models.GithubReportCreateAttempt{},
 		&models.ExecutionClaimAttempt{},
 		&models.JobStatusCallback{},
 		&models.ApplyRecovery{},
