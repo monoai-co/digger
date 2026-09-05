@@ -21,6 +21,11 @@ type githubSubmissionConfig struct {
 	Service      *githubci.GithubService
 }
 
+type githubSubmissionConfigError struct{ err error }
+
+func (err githubSubmissionConfigError) Error() string { return err.err.Error() }
+func (err githubSubmissionConfigError) Unwrap() error { return err.err }
+
 func (prepared *githubSubmissionConfig) pullRequestImpact(target models.GithubDeliveryTargetIntent, defaultBranch string) ([]digger_config.Project, map[string]digger_config.ProjectToSourceMapping, error) {
 	projects, sources, _, err := githubci.ProcessGitHubPullRequestFiles(target.PullRequestNumber, defaultBranch, target.BaseRef, prepared.ChangedFiles, prepared.Config, prepared.Projects)
 	return projects, sources, err
@@ -47,11 +52,11 @@ func loadGithubSubmissionConfig(ctx context.Context, provider utils.ContextGithu
 	err = git_utils.CloneComparisonAndDoAction(ctx, cloneURL, target.BaseSHA, target.HeadSHA, *token, "", func(directory string, changedFiles []string) error {
 		content, err := digger_config.ReadDiggerYmlFileContents(directory)
 		if err != nil {
-			return err
+			return githubSubmissionConfigError{err: err}
 		}
 		config, _, projects, _, err := digger_config.LoadDiggerConfig(directory, true, changedFiles, nil)
 		if err != nil {
-			return err
+			return githubSubmissionConfigError{err: err}
 		}
 		prepared.Content, prepared.Config, prepared.Projects = content, config, projects
 		prepared.ChangedFiles = append([]string{}, changedFiles...)

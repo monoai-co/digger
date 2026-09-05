@@ -361,10 +361,10 @@ func (d DiggerController) ProcessGithubWebhookDelivery(ctx context.Context, deli
 		return completedGithubWebhookResult("push_processed", handlePushEventDurable(ctx, gh, event, appID))
 	case *github.IssueCommentEvent:
 		slog.Info("Processing IssueCommentEvent", "action", event.GetAction(), "repo", event.GetRepo().GetFullName(), "issueNumber", event.GetIssue().GetNumber())
-		return completedGithubWebhookResult("issue_comment_processed", handleIssueCommentEventDurable(gh, event, d.CiBackendProvider, appID, d.GithubWebhookPostIssueCommentHooks))
+		return completedGithubWebhookResult("issue_comment_processed", d.processGithubCommentSubmission(ctx, delivery, event))
 	case *github.PullRequestEvent:
 		slog.Info("Processing PullRequestEvent", "action", event.GetAction(), "repo", event.GetRepo().GetFullName(), "prNumber", event.GetPullRequest().GetNumber(), "prId", event.GetPullRequest().GetID())
-		return completedGithubWebhookResult("pull_request_processed", handlePullRequestEventDurable(gh, event, d.CiBackendProvider, appID))
+		return completedGithubWebhookResult("pull_request_processed", d.processGithubPullRequestSubmission(ctx, delivery, event))
 	case *github.CheckRunEvent:
 		slog.Info("Processing CheckRunEvent", "action", event.GetAction(), "checkRunID", event.GetCheckRun().GetID())
 		if event.GetAction() != "requested_action" || event.GetRequestedAction() == nil {
