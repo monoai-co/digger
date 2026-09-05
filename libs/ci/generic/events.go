@@ -28,16 +28,20 @@ type ProcessIssueCommentEventResult struct {
 }
 
 func ProcessIssueCommentEvent(prNumber int, diggerConfig *digger_config.DiggerConfig, dependencyGraph graph.Graph[string, digger_config.Project], ciService ci.PullRequestService) (*ProcessIssueCommentEventResult, error) {
-	var impactedProjects []digger_config.Project
 	changedFiles, err := ciService.GetChangedFiles(prNumber)
 
 	if err != nil {
 		return &ProcessIssueCommentEventResult{}, fmt.Errorf("could not get changed files")
 	}
+	return ProcessIssueCommentFiles(prNumber, changedFiles, diggerConfig, dependencyGraph)
+}
 
+// ProcessIssueCommentFiles uses a selected comparison without rereading the PR.
+func ProcessIssueCommentFiles(prNumber int, changedFiles []string, diggerConfig *digger_config.DiggerConfig, dependencyGraph graph.Graph[string, digger_config.Project]) (*ProcessIssueCommentEventResult, error) {
 	impactedProjects, impactedProjectsSourceMapping := diggerConfig.GetModifiedProjects(changedFiles)
 
 	if diggerConfig.DependencyConfiguration.Mode == digger_config.DependencyConfigurationHard {
+		var err error
 		impactedProjects, err = FindAllProjectsDependantOnImpactedProjects(impactedProjects, dependencyGraph)
 		if err != nil {
 			return &ProcessIssueCommentEventResult{}, fmt.Errorf("failed to find all projects dependant on impacted projects")

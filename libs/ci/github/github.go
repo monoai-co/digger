@@ -1343,7 +1343,6 @@ func ProcessGitHubEvent(ghEvent interface{}, diggerConfig *digger_config.DiggerC
 }
 
 func ProcessGitHubPullRequestEvent(payload *github.PullRequestEvent, diggerConfig *digger_config.DiggerConfig, dependencyGraph graph.Graph[string, digger_config.Project], ciService ci.PullRequestService) ([]digger_config.Project, map[string]digger_config.ProjectToSourceMapping, int, error) {
-	var impactedProjects []digger_config.Project
 	var prNumber int
 	prNumber = *payload.PullRequest.Number
 	defaultBranch := *payload.Repo.DefaultBranch
@@ -1359,7 +1358,13 @@ func ProcessGitHubPullRequestEvent(payload *github.PullRequestEvent, diggerConfi
 		slog.Error("could not get changed files", "error", err, "prNumber", prNumber)
 		return nil, nil, prNumber, fmt.Errorf("could not get changed files")
 	}
+	return ProcessGitHubPullRequestFiles(prNumber, defaultBranch, targetBranch, changedFiles, diggerConfig, dependencyGraph)
+}
 
+// ProcessGitHubPullRequestFiles calculates impact from an already selected file
+// comparison. It performs no provider reads, so durable preparation can reuse its
+// saved base/head selection without consulting the live pull request again.
+func ProcessGitHubPullRequestFiles(prNumber int, defaultBranch, targetBranch string, changedFiles []string, diggerConfig *digger_config.DiggerConfig, dependencyGraph graph.Graph[string, digger_config.Project]) ([]digger_config.Project, map[string]digger_config.ProjectToSourceMapping, int, error) {
 	impactedProjects, impactedProjectsSourceLocations := diggerConfig.GetModifiedProjects(changedFiles)
 	slog.Info("identified directly impacted projects",
 		"count", len(impactedProjects),
@@ -1371,6 +1376,7 @@ func ProcessGitHubPullRequestEvent(payload *github.PullRequestEvent, diggerConfi
 		slog.Debug("using hard dependency mode, finding all dependent projects", "prNumber", prNumber)
 		originalCount := len(impactedProjects)
 
+		var err error
 		impactedProjects, err = generic.FindAllProjectsDependantOnImpactedProjects(impactedProjects, dependencyGraph)
 		if err != nil {
 			slog.Error("failed to find all projects dependant on impacted projects",

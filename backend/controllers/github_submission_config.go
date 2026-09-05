@@ -6,6 +6,7 @@ import (
 
 	"github.com/diggerhq/digger/backend/models"
 	"github.com/diggerhq/digger/backend/utils"
+	"github.com/diggerhq/digger/libs/ci/generic"
 	githubci "github.com/diggerhq/digger/libs/ci/github"
 	"github.com/diggerhq/digger/libs/digger_config"
 	"github.com/diggerhq/digger/libs/git_utils"
@@ -18,6 +19,15 @@ type githubSubmissionConfig struct {
 	Projects     graph.Graph[string, digger_config.Project]
 	ChangedFiles []string
 	Service      *githubci.GithubService
+}
+
+func (prepared *githubSubmissionConfig) pullRequestImpact(target models.GithubDeliveryTargetIntent, defaultBranch string) ([]digger_config.Project, map[string]digger_config.ProjectToSourceMapping, error) {
+	projects, sources, _, err := githubci.ProcessGitHubPullRequestFiles(target.PullRequestNumber, defaultBranch, target.BaseRef, prepared.ChangedFiles, prepared.Config, prepared.Projects)
+	return projects, sources, err
+}
+
+func (prepared *githubSubmissionConfig) commentImpact(target models.GithubDeliveryTargetIntent) (*generic.ProcessIssueCommentEventResult, error) {
+	return generic.ProcessIssueCommentFiles(target.PullRequestNumber, prepared.ChangedFiles, prepared.Config, prepared.Projects)
 }
 
 // loadGithubSubmissionConfig consumes a previously persisted target. Configuration
