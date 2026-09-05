@@ -1,8 +1,11 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -14,8 +17,46 @@ var ErrGithubSubmissionLockConflict = errors.New("project is locked by a differe
 // GithubSubmissionLocks is committed only with a new submission. Replay must not
 // reacquire a lock that a later PR-close delivery has already released.
 type GithubSubmissionLocks struct {
-	Acquire    []string `json:"acquire"`
-	ReleaseAll bool     `json:"release_all"`
+	Acquire      []string                    `json:"acquire"`
+	ReleaseAll   bool                        `json:"release_all"`
+	ClosedOwners []GithubSubmissionLockOwner `json:"closed_owners,omitempty"`
+}
+
+// GithubSubmissionLockOwner binds a closed-PR observation to one exact lock row.
+// A replacement row, even for the same project or PR, requires a fresh observation.
+type GithubSubmissionLockOwner struct {
+	ID                uint   `json:"id"`
+	Project           string `json:"project"`
+	PullRequestNumber int    `json:"pull_request_number"`
+}
+
+func (db *Database) ReadGithubSubmissionLockOwners(ctx context.Context, identity JobCreationIdentity, projects []string) ([]GithubSubmissionLockOwner, error) {
+	locks := &GithubSubmissionLocks{Acquire: append([]string(nil), projects...)}
+	if err := normalizeGithubSubmissionLocks(locks); err != nil {
+		return nil, err
+	}
+	owners := []GithubSubmissionLockOwner{}
+	err := db.WithAuthoritativeWriteTx(ctx, identity.DatabaseIdentity, identity.WriterEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		delivery, orgID, _, err := lockGithubPreparationDelivery(tx, identity)
+		if err != nil {
+			return err
+		}
+		target, err := loadGithubDeliveryTargetIntentTx(tx, identity, delivery, orgID)
+		if err != nil {
+			return err
+		}
+		for _, project := range locks.Acquire {
+			var rows []DiggerLock
+			if err := tx.Where("organisation_id = ? AND resource = ? AND lock_id <> ?", orgID, target.RepoOwner+"/"+target.RepoName+"#"+project, target.PullRequestNumber).Order("id").Find(&rows).Error; err != nil {
+				return err
+			}
+			for _, row := range rows {
+				owners = append(owners, GithubSubmissionLockOwner{ID: row.ID, Project: project, PullRequestNumber: row.LockId})
+			}
+		}
+		return nil
+	})
+	return owners, err
 }
 
 func normalizeGithubSubmissionLocks(locks *GithubSubmissionLocks) error {
@@ -33,6 +74,14 @@ func normalizeGithubSubmissionLocks(locks *GithubSubmissionLocks) error {
 			return ErrGithubSubmissionIntent
 		}
 	}
+	seen := make(map[uint]bool)
+	for _, owner := range locks.ClosedOwners {
+		if owner.ID == 0 || owner.PullRequestNumber <= 0 || seen[owner.ID] || !slices.Contains(locks.Acquire, owner.Project) {
+			return ErrGithubSubmissionIntent
+		}
+		seen[owner.ID] = true
+	}
+	sort.Slice(locks.ClosedOwners, func(i, j int) bool { return locks.ClosedOwners[i].ID < locks.ClosedOwners[j].ID })
 	return nil
 }
 
@@ -75,12 +124,21 @@ func applyGithubSubmissionLocks(tx *gorm.DB, identity JobCreationIdentity, deliv
 		if err := tx.Where("organisation_id = ? AND resource = ?", orgID, resource).Find(&existing).Error; err != nil {
 			return err
 		}
+		owned := false
 		for _, lock := range existing {
 			if lock.LockId != target.PullRequestNumber {
-				return ErrGithubSubmissionLockConflict
+				observation := GithubSubmissionLockOwner{ID: lock.ID, Project: project, PullRequestNumber: lock.LockId}
+				if !slices.Contains(locks.ClosedOwners, observation) {
+					return ErrGithubSubmissionLockConflict
+				}
+				if err := tx.Where("id = ? AND organisation_id = ? AND resource = ? AND lock_id = ?", lock.ID, orgID, resource, lock.LockId).Delete(&DiggerLock{}).Error; err != nil {
+					return err
+				}
+			} else {
+				owned = true
 			}
 		}
-		if len(existing) != 0 {
+		if owned {
 			continue
 		}
 		if err := tx.Omit("Organisation").Create(&DiggerLock{OrganisationID: orgID, Resource: resource, LockId: target.PullRequestNumber}).Error; err != nil {

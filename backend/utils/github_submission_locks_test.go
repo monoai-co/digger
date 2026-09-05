@@ -8,6 +8,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPostgresGithubSubmissionClosedLockReplacementComparesExactRows(t *testing.T) {
+	database, request, intent := newGithubSubmissionFixture(t)
+	require.NoError(t, database.GormDB.AutoMigrate(&models.DiggerLock{}))
+	old := models.DiggerLock{OrganisationID: request.OrganisationID, Resource: request.RepoFullName + "#root-one", LockId: request.PullRequestNumber + 1}
+	require.NoError(t, database.GormDB.Create(&old).Error)
+	owners, err := database.ReadGithubSubmissionLockOwners(context.Background(), request.Identity, []string{"root-one"})
+	require.NoError(t, err)
+	require.Equal(t, []models.GithubSubmissionLockOwner{{ID: old.ID, Project: "root-one", PullRequestNumber: old.LockId}}, owners)
+	intent.Locks = &models.GithubSubmissionLocks{Acquire: []string{"root-one"}, ClosedOwners: owners}
+	// A different row appeared after the provider observation, even though its
+	// project and owning PR are identical. The old observation cannot release it.
+	require.NoError(t, database.GormDB.Delete(&old).Error)
+	replacement := models.DiggerLock{OrganisationID: old.OrganisationID, Resource: old.Resource, LockId: old.LockId}
+	require.NoError(t, database.GormDB.Create(&replacement).Error)
+	_, _, err = database.RecordGithubSubmission(context.Background(), request.Identity, intent)
+	require.ErrorIs(t, err, models.ErrGithubSubmissionLockConflict)
+	intent.Locks.ClosedOwners, err = database.ReadGithubSubmissionLockOwners(context.Background(), request.Identity, intent.Locks.Acquire)
+	require.NoError(t, err)
+	_, created, err := database.RecordGithubSubmission(context.Background(), request.Identity, intent)
+	require.NoError(t, err)
+	require.True(t, created)
+	var held []models.DiggerLock
+	require.NoError(t, database.GormDB.Find(&held).Error)
+	require.Len(t, held, 1)
+	require.Equal(t, request.PullRequestNumber, held[0].LockId)
+}
+
 func TestPostgresGithubSubmissionLocksRollbackAndReplay(t *testing.T) {
 	database, request, intent := newGithubSubmissionFixture(t)
 	require.NoError(t, database.GormDB.AutoMigrate(&models.DiggerLock{}))
