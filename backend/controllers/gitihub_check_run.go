@@ -18,14 +18,11 @@ import (
 )
 
 func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
-	return handleCheckRunActionEventMode(context.Background(), gh, identifier, payload, ciBackendProvider, appId, false)
+	return handleCheckRunActionEventMode(context.Background(), gh, identifier, payload, ciBackendProvider, appId, nil)
 }
 
-func handleCheckRunActionEventDurable(ctx context.Context, gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
-	return handleCheckRunActionEventMode(ctx, gh, identifier, payload, ciBackendProvider, appId, true)
-}
-
-func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, durable bool) (err error) {
+func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, submission *githubCheckSubmissionPreparation) (err error) {
+	durable := submission != nil
 	defer func() {
 		if r := recover(); r != nil {
 			panicErr := fmt.Errorf("panic in handleCheckRunActionEvent: %v\n%s", r, debug.Stack())
@@ -107,9 +104,15 @@ func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientPro
 		return fmt.Errorf("error getting ghService to post error comment")
 	}
 
-	prBranchName, _, _, _, err := ghService.GetBranchName(prNumber)
-	if err != nil && durable {
-		return fmt.Errorf("get pull request branch name: %w", err)
+	prBranchName := checkRunBatch.BranchName
+	if durable {
+		prBranchName = submission.target.HeadRef
+		if prNumber != submission.target.PullRequestNumber || commitSha != submission.target.HeadSHA ||
+			repoOwner != submission.target.RepoOwner || repoName != submission.target.RepoName {
+			return models.ErrGithubCheckActionBinding
+		}
+	} else {
+		prBranchName, _, _, _, err = ghService.GetBranchName(prNumber)
 	}
 
 	diggerYmlStr, ghService, config, projectsGraph, err := GetDiggerConfigForBranchOrSha(gh, installationId, repoFullName, repoOwner, repoName, cloneUrl, prBranchName, commitSha, nil, nil)
@@ -128,7 +131,11 @@ func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientPro
 		})
 	})
 
-	jobs, err := generic.CreateJobsForProjects(selectedProjects, "digger apply", "check_run_action", repoFullName, actor, config.Workflows, &prNumber, &commitSha, "", checkRunBatch.BranchName, false)
+	jobBranchName := checkRunBatch.BranchName
+	if durable {
+		jobBranchName = prBranchName
+	}
+	jobs, err := generic.CreateJobsForProjects(selectedProjects, "digger apply", "check_run_action", repoFullName, actor, config.Workflows, &prNumber, &commitSha, "", jobBranchName, false)
 	if err != nil && durable {
 		return fmt.Errorf("create jobs for check run action: %w", err)
 	}
@@ -144,6 +151,16 @@ func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientPro
 	impactedProjectsJobMap := make(map[string]scheduler.Job)
 	for _, j := range jobs {
 		impactedProjectsJobMap[j.ProjectName] = j
+	}
+
+	if durable {
+		return submission.submit(ctx, utils.DurableJobGraphRequest{
+			Identity: submission.identity, JobType: scheduler.DiggerCommandApply, JobReporterType: reporterType,
+			OrganisationID: orgId, Jobs: impactedProjectsJobMap, Projects: impactedProjectsMap, ProjectsGraph: projectsGraph,
+			GithubInstallationID: installationId, Branch: prBranchName, PullRequestNumber: prNumber,
+			RepoOwner: repoOwner, RepoName: repoName, RepoFullName: repoFullName, CommitSHA: commitSha,
+			DiggerConfig: diggerYmlStr, ReportTerraformOutput: config.ReportTerraformOutputs,
+		})
 	}
 
 	batchCheckRunData, jobCheckRunDataMap, err := utils.SetPRCheckForJobs(ghService, prNumber, jobs, commitSha, repoName, repoOwner)

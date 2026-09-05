@@ -21,6 +21,7 @@ var ErrGithubSubmissionIntent = errors.New("github submission intent is invalid"
 var ErrGithubSubmissionConflict = errors.New("github submission conflicts with immutable preparation")
 var ErrGithubSubmissionClaim = errors.New("github submission delivery lease is not owned by this writer")
 var ErrGithubSubmissionTenant = errors.New("github submission tenant does not match its delivery")
+var ErrGithubSubmissionNotFound = errors.New("github submission has not been prepared")
 
 type GithubSubmissionSource struct {
 	Location string   `json:"location"`
@@ -262,6 +263,9 @@ func (db *Database) GetGithubSubmission(ctx context.Context, identity JobCreatio
 			return err
 		}
 		if err := tx.First(&result, "delivery_operation_id = ?", identity.DeliveryOperationID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrGithubSubmissionNotFound
+			}
 			return err
 		}
 		return validateStoredGithubSubmission(tx, identity, &result, delivery, orgID)

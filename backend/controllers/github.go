@@ -370,8 +370,7 @@ func (d DiggerController) ProcessGithubWebhookDelivery(ctx context.Context, deli
 		if event.GetAction() != "requested_action" || event.GetRequestedAction() == nil {
 			return ignoredGithubWebhookResult("check_run_action_ignored"), nil
 		}
-		identifier := event.GetRequestedAction().Identifier
-		return completedGithubWebhookResult("check_run_action_processed", handleCheckRunActionEventDurable(ctx, gh, identifier, event, d.CiBackendProvider, appID))
+		return completedGithubWebhookResult("check_run_action_processed", d.processGithubCheckSubmission(ctx, delivery, event))
 	default:
 		slog.Debug("Ignoring unsupported GitHub event", "eventType", reflect.TypeOf(event))
 		return ignoredGithubWebhookResult("event_type_ignored"), nil

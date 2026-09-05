@@ -393,7 +393,7 @@ func (p *GithubWebhookProcessor) finishClaim(delivery *models.GithubWebhookDeliv
 	}
 
 	lastError := truncateWebhookError(outcome.err.Error())
-	if delivery.AttemptCount >= p.config.MaxAttempts && now.Sub(delivery.ReceivedAt) >= p.config.RetryHorizon {
+	if !errors.Is(outcome.err, errGithubSubmissionReportsPending) && delivery.AttemptCount >= p.config.MaxAttempts && now.Sub(delivery.ReceivedAt) >= p.config.RetryHorizon {
 		if err := p.store.DeadLetterGithubWebhookDelivery(context.Background(), delivery.DeliveryID, leaseID, lastError, now, p.config.DatabaseIdentity, p.config.WriterEpoch); err != nil {
 			slog.Error("Failed to dead-letter GitHub webhook delivery", "deliveryID", delivery.DeliveryID, "error", err)
 			return
