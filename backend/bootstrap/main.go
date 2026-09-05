@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"context"
 	"crypto/hmac"
 	"embed"
 	"encoding/json"
@@ -305,11 +304,6 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		policyApiGroup.PUT("/", controllers.PolicyOrgUpsertApi)
 	}
 
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelStartup()
-	if err := controlPlane.Start(startupCtx); err != nil {
-		return nil, nil, fmt.Errorf("start control-plane workers: %w", err)
-	}
 	return r, controlPlane, nil
 }
 

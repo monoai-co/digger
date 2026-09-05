@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -49,9 +50,28 @@ func RunServer(ctx context.Context, handler http.Handler, port int, drainer grac
 		Handler:           trackedHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		drainer.StopAdmission()
+		return errors.Join(err, drainer.Shutdown(shutdownCtx))
+	}
+	if starter, ok := drainer.(interface{ Start(context.Context) error }); ok {
+		startupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		startupErr := starter.Start(startupCtx)
+		cancel()
+		if startupErr != nil {
+			closeErr := listener.Close()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			drainer.StopAdmission()
+			return errors.Join(startupErr, closeErr, drainer.Shutdown(shutdownCtx))
+		}
+	}
 	serveErrCh := make(chan error, 1)
 	go func() {
-		serveErrCh <- server.ListenAndServe()
+		serveErrCh <- server.Serve(listener)
 	}()
 
 	select {
