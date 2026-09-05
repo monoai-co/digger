@@ -68,6 +68,35 @@ func TestPostgresGithubReportAttemptOnlyFirstPreparationAllowsCreate(t *testing.
 	require.Equal(t, identity.WriterEpoch, attempt.WriterEpoch)
 }
 
+func TestPostgresGithubReportAttemptRejectsDifferentDeliveryTarget(t *testing.T) {
+	for _, field := range []string{"pull request", "head"} {
+		t.Run(field, func(t *testing.T) {
+			database, identity, valid := newGithubReportAttemptFixture(t)
+			payload, err := models.DecodeGithubReportCreatePayload(valid.Payload)
+			require.NoError(t, err)
+			if field == "pull request" {
+				payload.PullRequestNumber++
+			} else {
+				payload.ResourceKind, payload.Body, payload.HeadSHA = models.GithubReportResourceCheckRun, "", "different-head"
+				payload.Check = &models.GithubReportCheck{Name: "digger/plan", Status: "in_progress", Title: "Pending"}
+			}
+			raw, err := models.CanonicalGithubReportCreatePayload(payload)
+			require.NoError(t, err)
+			invalid := models.NewOutboxEffect(valid.ControlOperationID, valid.EffectKind, "wrong-target", raw, identity.WriterEpoch, time.Now())
+			invalid.LeaseID, invalid.LeaseExpiresAt, invalid.Status = valid.LeaseID, valid.LeaseExpiresAt, models.OutboxEffectProcessing
+			require.NoError(t, database.GormDB.Create(invalid).Error)
+			_, err = database.PrepareGithubReportCreate(context.Background(), invalid.ID, invalid.LeaseID, identity.DatabaseIdentity, identity.WriterEpoch)
+			require.ErrorIs(t, err, models.ErrGithubReportCreateConflict)
+			var count int64
+			require.NoError(t, database.GormDB.Model(&models.GithubReportCreateAttempt{}).Count(&count).Error)
+			require.Zero(t, count)
+			prepared, err := database.PrepareGithubReportCreate(context.Background(), valid.ID, valid.LeaseID, identity.DatabaseIdentity, identity.WriterEpoch)
+			require.NoError(t, err)
+			require.True(t, prepared.MayCreate)
+		})
+	}
+}
+
 func TestPostgresGithubReportAttemptCannotBeDeadLettered(t *testing.T) {
 	database, identity, effect := newGithubReportAttemptFixture(t)
 	prepared, err := database.PrepareGithubReportCreate(context.Background(), effect.ID, effect.LeaseID, identity.DatabaseIdentity, identity.WriterEpoch)
@@ -206,6 +235,7 @@ func TestPostgresGithubReportReceiptSurvivesInstallationDeactivation(t *testing.
 	require.NoError(t, err)
 	require.True(t, prepared.MayCreate)
 	require.NoError(t, database.GormDB.Model(&models.GithubAppInstallationLink{}).Where("github_installation_id = ?", prepared.Payload.GithubInstallationID).Update("status", models.GithubAppInstallationLinkInactive).Error)
+	require.NoError(t, database.GormDB.Model(&models.GithubWebhookDelivery{}).Where("operation_id = ?", identity.DeliveryOperationID).Update("lease_expires_at", time.Now().Add(-time.Minute)).Error)
 	replayed, err := database.PrepareGithubReportCreate(context.Background(), effect.ID, effect.LeaseID, identity.DatabaseIdentity, identity.WriterEpoch)
 	require.NoError(t, err)
 	require.False(t, replayed.MayCreate)
@@ -257,7 +287,7 @@ func TestPostgresGithubReportReceiptCannotAliasAnotherEffect(t *testing.T) {
 	database, identity, first := newGithubReportAttemptFixture(t)
 	payload, err := models.DecodeGithubReportCreatePayload(first.Payload)
 	require.NoError(t, err)
-	payload.PullRequestNumber = 43
+	payload.Body = "Another report for the same selected PR"
 	raw, err := models.CanonicalGithubReportCreatePayload(payload)
 	require.NoError(t, err)
 	second := models.NewOutboxEffect(first.ControlOperationID, models.GithubReportCreateEffectKind, "other-summary", raw, identity.WriterEpoch, time.Now())

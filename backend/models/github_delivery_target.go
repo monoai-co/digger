@@ -157,6 +157,27 @@ func validateStoredGithubDeliveryTarget(identity JobCreationIdentity, stored *Gi
 	return nil
 }
 
+// Read immutable selection without requiring a live delivery lease. Outbox
+// recovery can outlive both the delivery lease and installation authorization.
+func loadGithubDeliveryTargetIntentTx(tx *gorm.DB, identity JobCreationIdentity, delivery *GithubWebhookDelivery, orgID uint) (GithubDeliveryTargetIntent, error) {
+	var empty GithubDeliveryTargetIntent
+	preparation, err := PrepareGithubDeliveryTargetIntent(delivery)
+	if err != nil {
+		return empty, err
+	}
+	var target GithubDeliveryTarget
+	if err := tx.First(&target, "delivery_operation_id = ?", identity.DeliveryOperationID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return empty, ErrGithubDeliveryTargetNotFound
+		}
+		return empty, err
+	}
+	if err := validateStoredGithubDeliveryTarget(identity, &target, delivery, orgID, preparation); err != nil {
+		return empty, err
+	}
+	return DecodeGithubDeliveryTarget(target.Target)
+}
+
 func githubDeliveryTargetLeaseNow(tx *gorm.DB, delivery *GithubWebhookDelivery) error {
 	now, err := databaseTransactionNow(tx, time.Now().UTC())
 	if err != nil {

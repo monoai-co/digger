@@ -2,8 +2,6 @@ package controllers
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,7 +17,13 @@ import (
 )
 
 func TestPostgresGithubReportLostResponseRecoversAcrossWriterHandoff(t *testing.T) {
-	database, organisation, _ := newDurableExecutionIntegrationDatabase(t)
+	database, identity, delivery := githubDeliveryTargetDatabase(t)
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(delivery)
+	require.NoError(t, err)
+	intent, err := preparation.Resolve(targetResolutionPR())
+	require.NoError(t, err)
+	target, _, err := database.RecordGithubDeliveryTarget(context.Background(), identity, intent)
+	require.NoError(t, err)
 	// Apply the real permit/receipt migration, including identity triggers.
 	require.NoError(t, database.GormDB.Migrator().DropTable(&models.GithubReportCreateAttempt{}))
 	var schema string
@@ -31,15 +35,8 @@ func TestPostgresGithubReportLostResponseRecoversAcrossWriterHandoff(t *testing.
 	statement = strings.ReplaceAll(statement, "public.", schema+".")
 	require.NoError(t, database.GormDB.Transaction(func(tx *gorm.DB) error { return tx.Exec(statement).Error }))
 	installationID := int64(123)
-	rawDelivery := []byte(`{"action":"opened"}`)
-	digest := sha256.Sum256(rawDelivery)
-	delivery, _, err := database.RecordGithubWebhookDelivery(context.Background(), &models.GithubWebhookDelivery{
-		DeliveryID: "report-integration", Payload: rawDelivery, PayloadSHA256: hex.EncodeToString(digest[:]),
-		EventType: "pull_request", GithubAppID: 456, InstallationID: &installationID, RepositoryFullName: "monoai-co/sre",
-	}, durableExecutionIntegrationDatabaseIdentity, durableExecutionIntegrationWriterEpoch)
-	require.NoError(t, err)
-	payload := models.GithubReportCreatePayload{OrganisationID: organisation.ID, GithubAppID: 456,
-		GithubInstallationID: installationID, RepoOwner: "monoai-co", RepoName: "sre", PullRequestNumber: 42,
+	payload := models.GithubReportCreatePayload{OrganisationID: target.OrganisationID, GithubAppID: 456,
+		GithubInstallationID: installationID, RepoOwner: intent.RepoOwner, RepoName: intent.RepoName, PullRequestNumber: intent.PullRequestNumber,
 		ResourceKind: models.GithubReportResourceComment, Body: "Report prepared"}
 	raw, err := models.CanonicalGithubReportCreatePayload(payload)
 	require.NoError(t, err)
@@ -54,7 +51,7 @@ func TestPostgresGithubReportLostResponseRecoversAcrossWriterHandoff(t *testing.
 	client, server := reportTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/monoai-co/sre/issues/42/comments":
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/42/comments":
 			posts++
 			var posted github.IssueComment
 			if json.NewDecoder(r.Body).Decode(&posted) != nil {
@@ -63,7 +60,7 @@ func TestPostgresGithubReportLostResponseRecoversAcrossWriterHandoff(t *testing.
 			}
 			body = posted.GetBody()
 			json.NewEncoder(w).Encode(map[string]any{"id": 321, "body": body})
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/monoai-co/sre/issues/42/comments":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/42/comments":
 			reads++
 			json.NewEncoder(w).Encode([]any{map[string]any{"id": 321, "body": body, "user": map[string]any{"type": "Bot", "login": "digger[bot]"}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/apps/digger":

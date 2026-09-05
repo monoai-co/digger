@@ -251,6 +251,14 @@ func validateGithubReportEffectTx(tx *gorm.DB, effect *OutboxEffect, requireActi
 			return empty, ErrGithubReportCreateConflict
 		}
 	}
+	selected, err := loadGithubDeliveryTargetIntentTx(tx, JobCreationIdentity{DeliveryOperationID: delivery.OperationID, WriterEpoch: effect.WriterEpoch}, &delivery, payload.OrganisationID)
+	if err != nil {
+		return empty, fmt.Errorf("%w: %w", ErrGithubReportCreateConflict, err)
+	}
+	if selected.RepoOwner != payload.RepoOwner || selected.RepoName != payload.RepoName || selected.PullRequestNumber != payload.PullRequestNumber ||
+		(payload.ResourceKind == GithubReportResourceCheckRun && selected.HeadSHA != payload.HeadSHA) {
+		return empty, ErrGithubReportCreateConflict
+	}
 	// Only a new create permit needs current authorization. A committed permit
 	// must remain recoverable if installation access changes after the POST.
 	if !requireActiveAuthorization {
