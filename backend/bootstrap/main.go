@@ -175,6 +175,12 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 	r.GET("/ready", func(c *gin.Context) {
 		readyCtx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
+		if diggerController.ExecutionGrantSigningKeyID != "" {
+			if err := diggerController.ExecutionClaimsReady(readyCtx); err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "execution_keys_not_ready"})
+				return
+			}
+		}
 		if err := githubWebhookProcessor.Ready(readyCtx); err != nil {
 			slog.Error("GitHub webhook inbox is not ready", "error", err)
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})

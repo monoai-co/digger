@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -61,6 +62,10 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "execution identity rejected"})
 		return
 	}
+	if err := d.ExecutionClaimsReady(c.Request.Context()); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "execution grant keys are not ready"})
+		return
+	}
 	receipt, err := models.DB.ClaimDurableJobExecution(c.Request.Context(), models.DurableExecutionClaimRequest{
 		OperationID:         request.OperationID,
 		DiggerJobID:         c.Param("jobId"),
@@ -105,4 +110,11 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 		"signing_key_id":   receipt.SigningKeyID,
 		"grant_expires_at": receipt.GrantExpiresAt,
 	})
+}
+
+func (d DiggerController) ExecutionClaimsReady(ctx context.Context) error {
+	if d.ExecutionIdentityVerifier == nil || !immutableActionRef.MatchString(d.TrustedActionRef) || !cliDigest.MatchString(d.TrustedCLISHA256) {
+		return models.ErrExecutionGrantKeysNotReady
+	}
+	return models.DB.ValidateExecutionGrantKeys(ctx, d.ExecutionGrantSecrets, d.ExecutionGrantSigningKeyID)
 }

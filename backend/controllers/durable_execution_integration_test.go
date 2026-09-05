@@ -274,6 +274,15 @@ func TestPostgresDurableExecutionRejectsLostDispatchAndReplaysCanonicalClaim(t *
 		TrustedActionRef:             "diggerhq/digger@" + strings.Repeat("c", 40),
 		TrustedCLISHA256:             strings.Repeat("d", 64),
 	}
+	require.NoError(t, database.GormDB.Create(&models.ExecutionGrantKey{
+		KeyID:        controller.ExecutionGrantSigningKeyID,
+		SecretSHA256: models.ExecutionGrantSecretFingerprint(controller.ExecutionGrantSecrets[controller.ExecutionGrantSigningKeyID]),
+		RegisteredAt: time.Now().UTC(),
+	}).Error)
+	require.NoError(t, controller.ExecutionClaimsReady(context.Background()))
+	mismatchedController := controller
+	mismatchedController.ExecutionGrantSecrets = map[string][]byte{"integration-key-v1": bytes.Repeat([]byte{8}, 32)}
+	require.ErrorIs(t, mismatchedController.ExecutionClaimsReady(context.Background()), models.ErrExecutionGrantKeysNotReady)
 
 	waitForDurableExecutionIntegrationSignal(t, store.secondCompletionHit, "second completion")
 	assertDurableExecutionIntegrationEffect(t, database, effect.ID, models.OutboxEffectProcessing, 2, 0)
@@ -413,6 +422,7 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 		require.NoError(t, adminSQLDB.Close())
 	})
 	require.NoError(t, gormDB.AutoMigrate(
+		&models.ExecutionGrantKey{},
 		&models.ControlPlaneFence{},
 		&models.GithubWebhookOrderingDomain{},
 		&models.GithubWebhookDelivery{},
