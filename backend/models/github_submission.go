@@ -33,6 +33,7 @@ type GithubSubmissionIntent struct {
 	Sources    []GithubSubmissionSource `json:"sources"`
 	Reports    []GithubSubmissionReport `json:"reports"`
 	ReportOnly *GithubReportOnlyOutcome `json:"report_only,omitempty"`
+	Locks      *GithubSubmissionLocks   `json:"locks,omitempty"`
 }
 
 type GithubSubmissionReport struct {
@@ -79,6 +80,9 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 	if err := decodeGithubSubmissionJSON(raw, &intent); err != nil {
 		return intent, err
 	}
+	if err := normalizeGithubSubmissionLocks(intent.Locks); err != nil {
+		return intent, err
+	}
 	if intent.ReportOnly != nil {
 		return normalizeGithubReportOnlySubmission(intent)
 	}
@@ -93,6 +97,16 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 	projects := make(map[string]bool, len(intent.Graph.Jobs))
 	for _, job := range intent.Graph.Jobs {
 		projects[job.ProjectName] = true
+	}
+	if intent.Locks != nil {
+		if intent.Locks.ReleaseAll {
+			return intent, ErrGithubSubmissionIntent
+		}
+		for _, project := range intent.Locks.Acquire {
+			if !projects[project] {
+				return intent, ErrGithubSubmissionIntent
+			}
+		}
 	}
 	if intent.Sources == nil {
 		intent.Sources = []GithubSubmissionSource{}
@@ -238,6 +252,9 @@ func (db *Database) RecordGithubSubmission(ctx context.Context, identity JobCrea
 			return nil
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err := applyGithubSubmissionLocks(tx, identity, delivery, orgID, normalized.Locks); err != nil {
 			return err
 		}
 		// VCS/organisation locks in envelope validation can wait past the lease.
