@@ -43,7 +43,7 @@ func DecodeGithubDeliveryTarget(raw []byte) (GithubDeliveryTargetIntent, error) 
 		return target, ErrGithubDeliveryTargetIntent
 	}
 	if target.RepositoryID <= 0 || !validGithubReportPathSegment(target.RepoOwner) || !validGithubReportPathSegment(target.RepoName) ||
-		target.PullRequestNumber <= 0 || !validGithubReportPathSegment(target.HeadSHA) || !validGithubDeliveryHeadRef(target.HeadRef) {
+		target.PullRequestNumber <= 0 || !validGithubReportPathSegment(target.HeadSHA) || !validGithubDeliveryHeadRef(target.HeadRef) || !validGithubDeliveryBase(target) {
 		return target, ErrGithubDeliveryTargetIntent
 	}
 	if target.Source != GithubDeliveryTargetSignedPullRequest && target.Source != GithubDeliveryTargetIssueCommentLookup && target.Source != GithubDeliveryTargetLegacyCheckAction {

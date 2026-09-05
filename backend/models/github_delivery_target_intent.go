@@ -30,6 +30,8 @@ type GithubDeliveryTargetIntent struct {
 	HeadSHA           string                     `json:"head_sha"`
 	HeadRef           string                     `json:"head_ref"`
 	Source            GithubDeliveryTargetSource `json:"source"`
+	BaseSHA           string                     `json:"base_sha,omitempty"`
+	BaseRef           string                     `json:"base_ref,omitempty"`
 }
 
 type GithubDeliveryTargetLookup struct {
@@ -176,10 +178,11 @@ func (preparation *GithubDeliveryTargetPreparation) ValidateIntent(intent Github
 	switch expected.Source {
 	case GithubDeliveryTargetSignedPullRequest:
 	case GithubDeliveryTargetIssueCommentLookup:
-		if !utf8.ValidString(intent.HeadSHA) || !validGithubReportPathSegment(intent.HeadSHA) || !validGithubDeliveryHeadRef(intent.HeadRef) {
+		if !utf8.ValidString(intent.HeadSHA) || !validGithubReportPathSegment(intent.HeadSHA) || !validGithubDeliveryHeadRef(intent.HeadRef) || !validGithubDeliveryBase(intent) {
 			return ErrGithubDeliveryTargetIntent
 		}
 		expected.HeadSHA, expected.HeadRef = intent.HeadSHA, intent.HeadRef
+		expected.BaseSHA, expected.BaseRef = intent.BaseSHA, intent.BaseRef
 	case GithubDeliveryTargetLegacyCheckAction:
 		if intent.PullRequestNumber <= 0 || !validGithubDeliveryHeadRef(intent.HeadRef) {
 			return ErrGithubDeliveryTargetIntent
@@ -203,7 +206,18 @@ func (preparation *GithubDeliveryTargetPreparation) resolvePR(pullRequest *githu
 	}
 	// The head repository may be a fork; only the base identifies the PR tenant.
 	target.HeadSHA, target.HeadRef = pullRequest.GetHead().GetSHA(), pullRequest.GetHead().GetRef()
+	target.BaseSHA, target.BaseRef = pullRequest.GetBase().GetSHA(), pullRequest.GetBase().GetRef()
+	if !validGithubDeliveryBase(target) {
+		return GithubDeliveryTargetIntent{}, ErrGithubDeliveryTargetIntent
+	}
 	return target, nil
+}
+
+func validGithubDeliveryBase(target GithubDeliveryTargetIntent) bool {
+	if target.BaseSHA == "" && target.BaseRef == "" {
+		return true
+	}
+	return utf8.ValidString(target.BaseSHA) && validGithubReportPathSegment(target.BaseSHA) && validGithubDeliveryHeadRef(target.BaseRef)
 }
 
 func validGithubDeliveryHeadRef(ref string) bool {

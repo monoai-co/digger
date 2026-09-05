@@ -39,6 +39,41 @@ func deliveryTargetCommentFixture(t *testing.T) *GithubWebhookDelivery {
 	return deliveryTargetFixture(t, "issue_comment", &github.IssueCommentEvent{Issue: &github.Issue{Number: github.Int(42), PullRequestLinks: &github.PullRequestLinks{URL: github.String("https://api.github.com/repos/owner/repo/pulls/42")}}, Repo: deliveryTargetRepository(), Installation: &github.Installation{ID: github.Int64(20)}})
 }
 
+func TestGithubDeliveryTargetPreservesComparisonBase(t *testing.T) {
+	pr := deliveryTargetPR()
+	pr.Base.SHA, pr.Base.Ref = github.String("base-commit"), github.String("main")
+	preparation, err := PrepareGithubDeliveryTargetIntent(deliveryTargetCommentFixture(t))
+	require.NoError(t, err)
+	target, err := preparation.Resolve(pr)
+	require.NoError(t, err)
+	raw, err := json.Marshal(target)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"base_sha":"base-commit"`)
+	require.Contains(t, string(raw), `"base_ref":"main"`)
+	require.NoError(t, preparation.ValidateIntent(target))
+	decoded, err := DecodeGithubDeliveryTarget(raw)
+	require.NoError(t, err)
+	require.Equal(t, target, decoded)
+	signed := deliveryTargetFixture(t, "pull_request", &github.PullRequestEvent{Number: github.Int(42), PullRequest: pr, Repo: deliveryTargetRepository(), Installation: &github.Installation{ID: github.Int64(20)}})
+	signedPreparation, err := PrepareGithubDeliveryTargetIntent(signed)
+	require.NoError(t, err)
+	signedTarget, err := signedPreparation.Resolve(nil)
+	require.NoError(t, err)
+	require.Equal(t, "base-commit", signedTarget.BaseSHA)
+	signedTarget.BaseSHA = "new-base"
+	require.ErrorIs(t, signedPreparation.ValidateIntent(signedTarget), ErrGithubDeliveryTargetIntent)
+	for _, mutate := range []func(*github.PullRequest){
+		func(pr *github.PullRequest) { pr.Base.SHA = github.String("") },
+		func(pr *github.PullRequest) { pr.Base.Ref = github.String("") },
+		func(pr *github.PullRequest) { pr.Base.Ref = github.String("main\x00") },
+	} {
+		pr.Base.SHA, pr.Base.Ref = github.String("base-commit"), github.String("main")
+		mutate(pr)
+		_, err := preparation.Resolve(pr)
+		require.ErrorIs(t, err, ErrGithubDeliveryTargetIntent)
+	}
+}
+
 func TestGithubDeliveryTargetSignedPRAllowsForkAndRemainsDetached(t *testing.T) {
 	delivery := deliveryTargetSignedFixture(t)
 	preparation, err := PrepareGithubDeliveryTargetIntent(delivery)

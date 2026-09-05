@@ -45,8 +45,10 @@ func TestPostgresGithubDeliveryTargetReplayKeepsFirstHeadAcrossWriterHandoff(t *
 	client, _ := reportTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		pr := targetResolutionPR()
+		pr.Base.SHA, pr.Base.Ref = github.String("original-base"), github.String("main")
 		if requests > 1 {
 			pr.Head.SHA = github.String("newer-head")
+			pr.Base.SHA = github.String("newer-base")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pr)
@@ -65,6 +67,7 @@ func TestPostgresGithubDeliveryTargetReplayKeepsFirstHeadAcrossWriterHandoff(t *
 	intent, err := models.DecodeGithubDeliveryTarget(second.Target)
 	require.NoError(t, err)
 	require.Equal(t, "original-commit", intent.HeadSHA)
+	require.Equal(t, "original-base", intent.BaseSHA)
 	require.Equal(t, 1, requests)
 	intent.HeadSHA = "newer-head"
 	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), identity, intent)
