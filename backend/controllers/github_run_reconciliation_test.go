@@ -137,6 +137,19 @@ func TestPostgresGithubRunInvalidObservationPollsPastAttemptLimitAndRecordsRecov
 	config.DatabaseIdentity = durableExecutionIntegrationDatabaseIdentity
 	config.WriterEpoch = durableExecutionIntegrationWriterEpoch
 	config.MaxAttempts = 2
+	config.LeaseDuration = 2 * time.Second
+	// Exercise ordinary database latency while retaining the retry-limit test.
+	require.NoError(t, database.GormDB.Exec(`
+CREATE FUNCTION delayed_reconciliation_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status <> 'processing' AND NEW.status = 'processing' THEN
+    PERFORM pg_sleep(0.15);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER delayed_reconciliation_claim BEFORE UPDATE ON outbox_effects
+FOR EACH ROW EXECUTE FUNCTION delayed_reconciliation_claim();`).Error)
 	dispatcher := newTestOutboxDispatcher(t, database, dispatch, config)
 	dispatcher.Start()
 	t.Cleanup(func() { shutdownOutboxDispatcher(t, dispatcher) })

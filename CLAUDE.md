@@ -32,6 +32,9 @@
 - When sharing a GORM query with locking clauses, start each query from
   `Session(&gorm.Session{})`; otherwise table and predicates can leak into the
   next lookup. Keep the PostgreSQL resolver tests enabled to catch this.
+- The generic outbox test lease is 90 ms. PostgreSQL reconciliation tests use
+  a longer lease and delayed-claim regression: database latency can consume
+  that short lease before dispatch starts, unrelated to execution-grant expiry.
 - For GORM relations whose foreign and referenced field names coincide, declare
   `belongsTo` explicitly. Otherwise AutoMigrate can infer the reverse foreign key;
   verify both PostgreSQL migration output and the SQLite test schema.
