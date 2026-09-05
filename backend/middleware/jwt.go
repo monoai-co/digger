@@ -197,8 +197,6 @@ func JWTBearerTokenAuth(auth services.Auth) gin.HandlerFunc {
 			}
 		} else if strings.HasPrefix(token, "t:") {
 			slog.Debug("Processing API token")
-			var dbToken models.Token
-
 			tokenObj, err := models.DB.GetToken(token)
 			if tokenObj == nil {
 				slog.Warn("Invalid bearer token", "token", token)
@@ -213,9 +211,10 @@ func JWTBearerTokenAuth(auth services.Auth) gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			c.Set(ORGANISATION_ID_KEY, dbToken.OrganisationID)
-			c.Set(ACCESS_LEVEL_KEY, dbToken.Type)
-			slog.Debug("API token verified", "organisationId", dbToken.OrganisationID, "accessLevel", dbToken.Type)
+			c.Set(ORGANISATION_ID_KEY, tokenObj.OrganisationID)
+			c.Set(ACCESS_LEVEL_KEY, tokenObj.Type)
+			c.Set(AUTHENTICATED_ACTOR_KEY, fmt.Sprintf("api-token:%d", tokenObj.ID))
+			slog.Debug("API token verified", "organisationId", tokenObj.OrganisationID, "accessLevel", tokenObj.Type)
 		} else {
 			slog.Debug("Processing JWT token")
 			jwtPublicKey := os.Getenv("JWT_PUBLIC_KEY")
@@ -265,6 +264,9 @@ func JWTBearerTokenAuth(auth services.Auth) gin.HandlerFunc {
 				return
 			}
 			slog.Debug("JWT token verified successfully")
+			if subject, subjectErr := claims.GetSubject(); subjectErr == nil && subject != "" && subject == strings.TrimSpace(subject) {
+				c.Set(AUTHENTICATED_ACTOR_KEY, "jwt-sub:"+subject)
+			}
 		}
 
 		c.Next()
@@ -308,3 +310,4 @@ const ORGANISATION_SOURCE_KEY = "organisation_Source"
 const USER_ID_KEY = "user_ID"
 const ACCESS_LEVEL_KEY = "access_level"
 const JOB_TOKEN_KEY = "job_token"
+const AUTHENTICATED_ACTOR_KEY = "authenticated_actor"

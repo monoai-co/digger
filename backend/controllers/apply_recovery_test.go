@@ -23,6 +23,18 @@ import (
 
 const applyRecoveryTestGrantKeyID = "apply-recovery-test-key"
 
+func TestApplyRecoveryRejectsUnverifiedJWTActor(t *testing.T) {
+	t.Setenv("JWT_AUTH", "true")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPut, "/", nil)
+	c.Request.Header.Set("Authorization", "Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdHRhY2tlciJ9.")
+	c.Set(middleware.ACCESS_LEVEL_KEY, models.AdminPolicyType)
+	c.Set(middleware.ORGANISATION_ID_KEY, uint(1))
+	c.Set(middleware.USER_ID_KEY, "unverified-header-user")
+	_, _, authenticated := applyRecoveryOperator(c)
+	require.False(t, authenticated)
+}
+
 var applyRecoveryTestGrantSecret = []byte("apply-recovery-test-grant-secret-32")
 
 func TestPostgresApplyRecoveryAdminRoutesAreStrictScopedAndReplayable(t *testing.T) {
@@ -152,7 +164,7 @@ func TestPostgresApplyRecoveryAdminRoutesAreStrictScopedAndReplayable(t *testing
 	tenantRouter.Use(func(c *gin.Context) {
 		c.Set(middleware.ACCESS_LEVEL_KEY, models.AdminPolicyType)
 		c.Set(middleware.ORGANISATION_ID_KEY, otherOrganisation.ID)
-		c.Set(middleware.USER_ID_KEY, "other-operator")
+		c.Set(middleware.AUTHENTICATED_ACTOR_KEY, "user:other-operator")
 	})
 	tenantRouter.GET("/admin/apply-recoveries/:operationID", controller.GetApplyRecovery)
 	response = performApplyRecoveryRequest(t, tenantRouter, http.MethodGet, operationPath, "", nil)

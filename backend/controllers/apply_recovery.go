@@ -3,10 +3,8 @@ package controllers
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -14,7 +12,6 @@ import (
 	"github.com/diggerhq/digger/backend/models"
 	"github.com/diggerhq/digger/libs/operation"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -148,57 +145,11 @@ func applyRecoveryOperator(c *gin.Context) (uint, string, bool) {
 	if organisationID == 0 {
 		return 0, "", false
 	}
-	if userID, exists := c.Get(middleware.USER_ID_KEY); exists {
-		principal := strings.TrimSpace(fmt.Sprint(userID))
-		if principal != "" && len(principal) <= 1019 {
-			return organisationID, "user:" + principal, true
-		}
-	}
-	authorization := c.GetHeader("Authorization")
-	token := strings.TrimPrefix(authorization, "Bearer ")
-	if token == "" || token == authorization {
+	actor := c.GetString(middleware.AUTHENTICATED_ACTOR_KEY)
+	if actor == "" || actor != strings.TrimSpace(actor) || len(actor) > 1024 {
 		return 0, "", false
 	}
-	if !applyRecoveryAuthFlag("JWT_AUTH") {
-		configured := os.Getenv("BEARER_AUTH_TOKEN")
-		if !applyRecoveryAuthFlag("HTTP_BASIC_AUTH") || configured == "" || token != configured {
-			return 0, "", false
-		}
-		return organisationID, "static-admin", true
-	}
-	if strings.HasPrefix(token, "t:") {
-		apiToken, err := models.DB.GetToken(token)
-		if err != nil || apiToken == nil || apiToken.ID == 0 || apiToken.OrganisationID != organisationID || apiToken.Type != models.AdminPolicyType {
-			return 0, "", false
-		}
-		return organisationID, fmt.Sprintf("api-token:%d", apiToken.ID), true
-	}
-	claims := jwt.MapClaims{}
-	if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
-		return 0, "", false
-	}
-	subject, err := claims.GetSubject()
-	if err != nil {
-		return 0, "", false
-	}
-	subject = strings.TrimSpace(subject)
-	if subject == "" || len(subject) > 1016 {
-		return 0, "", false
-	}
-	return organisationID, "jwt-sub:" + subject, true
-}
-
-func applyRecoveryAuthFlag(name string) bool {
-	value, exists := os.LookupEnv(name)
-	if !exists {
-		return false
-	}
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return organisationID, actor, true
 }
 
 func publicApplyRecovery(recovery *models.ApplyRecovery) (*applyRecoveryResponse, error) {

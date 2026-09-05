@@ -74,10 +74,11 @@ func HttpBasicApiAuth() gin.HandlerFunc {
 				slog.Debug("Job token verified", "organisationId", jobToken.OrganisationID, "accessLevel", jobToken.Type)
 				c.Next()
 			}
-		} else if token == os.Getenv("BEARER_AUTH_TOKEN") {
+		} else if token != "" && token == os.Getenv("BEARER_AUTH_TOKEN") {
 			slog.Debug("Using admin bearer token")
 			setDefaultOrganisationId(c)
 			c.Set(ACCESS_LEVEL_KEY, models.AdminPolicyType)
+			c.Set(AUTHENTICATED_ACTOR_KEY, "static-admin")
 			c.Next()
 		} else {
 			slog.Warn("Invalid Bearer token")
