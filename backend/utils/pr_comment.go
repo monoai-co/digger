@@ -187,6 +187,14 @@ func ReportInitialJobsStatus(cr *CommentReporter, jobs []scheduler.Job) error {
 }
 
 func GetInitialJobSummary(jobs []scheduler.Job) string {
+	jobSpecs := make([]scheduler.JobJson, len(jobs))
+	for index, job := range jobs {
+		jobSpecs[index] = scheduler.JobJson{ProjectName: job.ProjectName, ProjectAlias: job.ProjectAlias}
+	}
+	return GetInitialJobSummaryFromJobSpecs(jobSpecs)
+}
+
+func GetInitialJobSummaryFromJobSpecs(jobs []scheduler.JobJson) string {
 	message := ""
 	if len(jobs) == 0 {
 		message = message + ":construction_worker: No projects impacted"
@@ -206,20 +214,30 @@ func ReportLayersTableForJobs(cr *CommentReporter, jobs []scheduler.Job) error {
 	prService := cr.PrService
 	commentId := cr.CommentId
 
-	// sort jobs by layer for better display (sort by name too)
-	sort.Slice(jobs, func(i, j int) bool {
-		if jobs[i].Layer == jobs[j].Layer {
-			return jobs[i].ProjectName < jobs[j].ProjectName
-		}
-		return jobs[i].Layer < jobs[j].Layer
-	})
-
 	slog.Info("Reporting initial jobs status",
 		"prNumber", prNumber,
 		"commentId", commentId,
 		"jobCount", len(jobs),
 	)
 
+	message := trimMessageIfExceedsMaxLength(GetLayersTableForJobs(jobs))
+	if err := prService.EditComment(prNumber, commentId, message); err != nil {
+		slog.Error("Failed to update comment with initial jobs status", "prNumber", prNumber, "commentId", commentId, "error", err)
+		return err
+	}
+	slog.Debug("Successfully reported initial jobs status", "prNumber", prNumber, "commentId", commentId)
+	return nil
+}
+
+// GetLayersTableForJobs renders the layer overview without reordering caller state.
+func GetLayersTableForJobs(jobs []scheduler.Job) string {
+	jobs = append([]scheduler.Job(nil), jobs...)
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].Layer == jobs[j].Layer {
+			return jobs[i].ProjectName < jobs[j].ProjectName
+		}
+		return jobs[i].Layer < jobs[j].Layer
+	})
 	message := ""
 	if len(jobs) == 0 {
 		message = message + ":construction_worker: No projects impacted"
@@ -245,17 +263,5 @@ To deploy the next layer, run "digger plan --layer 1". To apply the next layer, 
 And so on. A new commit on the branch will restart this deployment process.
 </details>
 `
-	message = trimMessageIfExceedsMaxLength(message)
-	err := prService.EditComment(prNumber, commentId, message)
-	if err != nil {
-		slog.Error("Failed to update comment with initial jobs status",
-			"prNumber", prNumber,
-			"commentId", commentId,
-			"error", err,
-		)
-		return err
-	}
-
-	slog.Debug("Successfully reported initial jobs status", "prNumber", prNumber, "commentId", commentId)
-	return nil
+	return message
 }
