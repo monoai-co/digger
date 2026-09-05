@@ -1,4 +1,4 @@
-h1:U52dp8qjgVUYrjjZ6VBDlbNCU3//HfDfOm6+SO10IZc=
+h1:ruKknDzi+jAKVta3/D9AaMuSxcLMb3AU3dpwMbZ/kwE=
 20231227132525.sql h1:43xn7XC0GoJsCnXIMczGXWis9d504FAWi4F1gViTIcw=
 20240115170600.sql h1:IW8fF/8vc40+eWqP/xDK+R4K9jHJ9QBSGO6rN9LtfSA=
 20240116123649.sql h1:R1JlUIgxxF6Cyob9HdtMqiKmx/BfnsctTl5rvOqssQw=
@@ -86,3 +86,4 @@ h1:U52dp8qjgVUYrjjZ6VBDlbNCU3//HfDfOm6+SO10IZc=
 20260905047000_apply_recovery.sql h1:es7isK3K3NniGbW9UKH09/YR+3Fwo2vlq9//JoxDCFw=
 20260905048000_github_submissions.sql h1:wl0jw6OZIfySlLdMUVufKp7xU/oX5SU0nSFdMuXw/Lc=
 20260905049000_github_report_attempts.sql h1:gi0fyihT79IxEsWF7ZEQakDE1iy9zvb+Vxh2n7BbO3w=
+20260905050000_github_delivery_targets.sql h1:oV3bnowrzv4WXsohZwNSE3m+oFclHPfsDIA/3szkCBg=

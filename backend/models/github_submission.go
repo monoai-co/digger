@@ -132,7 +132,7 @@ func (db *Database) RecordGithubSubmission(ctx context.Context, identity JobCrea
 	var result *GithubSubmission
 	created := false
 	err = db.WithAuthoritativeWriteTx(ctx, identity.DatabaseIdentity, identity.WriterEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
-		delivery, orgID, now, err := lockGithubSubmissionDelivery(tx, identity)
+		delivery, orgID, now, err := lockGithubPreparationDelivery(tx, identity)
 		if err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func (db *Database) RecordGithubSubmission(ctx context.Context, identity JobCrea
 func (db *Database) GetGithubSubmission(ctx context.Context, identity JobCreationIdentity) (*GithubSubmission, error) {
 	var result GithubSubmission
 	err := db.WithAuthoritativeWriteTx(ctx, identity.DatabaseIdentity, identity.WriterEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
-		delivery, orgID, _, err := lockGithubSubmissionDelivery(tx, identity)
+		delivery, orgID, _, err := lockGithubPreparationDelivery(tx, identity)
 		if err != nil {
 			return err
 		}
@@ -195,7 +195,7 @@ func (db *Database) GetGithubSubmission(ctx context.Context, identity JobCreatio
 	return &result, nil
 }
 
-func lockGithubSubmissionDelivery(tx *gorm.DB, identity JobCreationIdentity) (*GithubWebhookDelivery, uint, time.Time, error) {
+func lockGithubPreparationDelivery(tx *gorm.DB, identity JobCreationIdentity) (*GithubWebhookDelivery, uint, time.Time, error) {
 	if identity.ProtocolVersion != operation.ProtocolVersion {
 		return nil, 0, time.Time{}, ErrControlPlaneProtocol
 	}

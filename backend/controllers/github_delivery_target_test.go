@@ -16,7 +16,21 @@ import (
 	"github.com/diggerhq/digger/libs/operation"
 	"github.com/google/go-github/v61/github"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+type missingDeliveryTargetStore struct{ *models.Database }
+
+func (missingDeliveryTargetStore) GetGithubDeliveryTarget(context.Context, models.JobCreationIdentity) (*models.GithubDeliveryTarget, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
+func TestGithubDeliveryTargetMissingDeliveryDoesNotResolveProvider(t *testing.T) {
+	provider := &targetResolutionProvider{}
+	_, err := prepareGithubDeliveryTarget(context.Background(), models.JobCreationIdentity{}, targetResolutionComment(t), missingDeliveryTargetStore{}, provider)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	require.Zero(t, provider.calls)
+}
 
 type targetResolutionProvider struct {
 	utils.DiggerGithubClientMockProvider

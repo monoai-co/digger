@@ -52,7 +52,7 @@ type GithubDeliveryTargetPreparation struct {
 // receipt. It validates its stored identity; it does not authenticate raw input.
 func PrepareGithubDeliveryTargetIntent(delivery *GithubWebhookDelivery) (*GithubDeliveryTargetPreparation, error) {
 	if delivery == nil || delivery.GithubAppID <= 0 || delivery.InstallationID == nil || *delivery.InstallationID <= 0 ||
-		strings.TrimSpace(delivery.DeliveryID) == "" || delivery.PayloadSHA256 != payloadSHA256(delivery.Payload) {
+		strings.TrimSpace(delivery.DeliveryID) == "" || !utf8.Valid(delivery.Payload) || delivery.PayloadSHA256 != payloadSHA256(delivery.Payload) {
 		return nil, ErrGithubDeliveryTargetIntent
 	}
 	expected, err := operation.Derive("github-webhook-delivery", fmt.Sprintf("github-app:%d", delivery.GithubAppID), "delivery:"+delivery.DeliveryID)
@@ -148,6 +148,30 @@ func (preparation *GithubDeliveryTargetPreparation) Resolve(pullRequest *github.
 	default:
 		return GithubDeliveryTargetIntent{}, ErrGithubDeliveryTargetUnsupported
 	}
+}
+
+// ValidateIntent rechecks the selected value against the accepted delivery.
+// An issue comment has no signed head: its head/ref are a trusted controller
+// observation, validated by Resolve before the first immutable write.
+func (preparation *GithubDeliveryTargetPreparation) ValidateIntent(intent GithubDeliveryTargetIntent) error {
+	if preparation == nil {
+		return ErrGithubDeliveryTargetIntent
+	}
+	expected := preparation.target
+	switch expected.Source {
+	case GithubDeliveryTargetSignedPullRequest:
+	case GithubDeliveryTargetIssueCommentLookup:
+		if !utf8.ValidString(intent.HeadSHA) || !validGithubReportPathSegment(intent.HeadSHA) || !validGithubDeliveryHeadRef(intent.HeadRef) {
+			return ErrGithubDeliveryTargetIntent
+		}
+		expected.HeadSHA, expected.HeadRef = intent.HeadSHA, intent.HeadRef
+	default:
+		return ErrGithubDeliveryTargetUnsupported
+	}
+	if expected != intent {
+		return ErrGithubDeliveryTargetIntent
+	}
+	return nil
 }
 
 func (preparation *GithubDeliveryTargetPreparation) resolvePR(pullRequest *github.PullRequest) (GithubDeliveryTargetIntent, error) {

@@ -29,6 +29,7 @@ func (db *Database) CheckDurableControlPlaneSchema(ctx context.Context) error {
 		{"status callbacks", &[]JobStatusCallback{}},
 		{"apply recoveries", &[]ApplyRecovery{}},
 		{"GitHub submissions", &[]GithubSubmission{}},
+		{"GitHub delivery targets", &[]GithubDeliveryTarget{}},
 		{"GitHub report attempts", &[]GithubReportCreateAttempt{}},
 		{"GitHub report receipts", &[]GithubReportReceipt{}},
 	}
