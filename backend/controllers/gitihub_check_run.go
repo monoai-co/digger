@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -17,14 +18,14 @@ import (
 )
 
 func handleCheckRunActionEvent(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
-	return handleCheckRunActionEventMode(gh, identifier, payload, ciBackendProvider, appId, false)
+	return handleCheckRunActionEventMode(context.Background(), gh, identifier, payload, ciBackendProvider, appId, false)
 }
 
-func handleCheckRunActionEventDurable(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
-	return handleCheckRunActionEventMode(gh, identifier, payload, ciBackendProvider, appId, true)
+func handleCheckRunActionEventDurable(ctx context.Context, gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64) error {
+	return handleCheckRunActionEventMode(ctx, gh, identifier, payload, ciBackendProvider, appId, true)
 }
 
-func handleCheckRunActionEventMode(gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, durable bool) (err error) {
+func handleCheckRunActionEventMode(ctx context.Context, gh utils.GithubClientProvider, identifier string, payload *github.CheckRunEvent, ciBackendProvider ci_backends.CiBackendProvider, appId int64, durable bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			panicErr := fmt.Errorf("panic in handleCheckRunActionEvent: %v\n%s", r, debug.Stack())
@@ -45,7 +46,15 @@ func handleCheckRunActionEventMode(gh utils.GithubClientProvider, identifier str
 	var checkedRunDiggerJobs []models.DiggerJob
 
 	batchCheckApplyAllPrefix := string(utils.CheckedRunActionBatchApply) + ":"
-	if strings.HasPrefix(identifier, batchCheckApplyAllPrefix) {
+	if durable {
+		if payload.GetRequestedAction() == nil || payload.GetRequestedAction().Identifier != identifier {
+			return models.ErrGithubCheckActionBinding
+		}
+		checkRunBatch, checkedRunDiggerJobs, err = models.DB.ResolveLegacyGithubCheckAction(ctx, payload, appId)
+		if err != nil {
+			return err
+		}
+	} else if strings.HasPrefix(identifier, batchCheckApplyAllPrefix) {
 		diggerBatchId := strings.ReplaceAll(identifier, batchCheckApplyAllPrefix, "")
 		var err error
 		checkRunBatch, err = models.DB.GetDiggerBatchFromId(diggerBatchId)
