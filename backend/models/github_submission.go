@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/diggerhq/digger/libs/operation"
 	"gorm.io/gorm"
@@ -29,6 +30,13 @@ type GithubSubmissionSource struct {
 type GithubSubmissionIntent struct {
 	Graph   DurableGraphIntent       `json:"graph"`
 	Sources []GithubSubmissionSource `json:"sources"`
+	Reports []GithubSubmissionReport `json:"reports"`
+}
+
+type GithubSubmissionReport struct {
+	Key      string          `json:"key"`
+	Payload  json.RawMessage `json:"payload"`
+	Optional bool            `json:"optional"`
 }
 
 // GithubSubmission preserves the first selected execution and reporting inputs.
@@ -83,6 +91,28 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 		}
 	}
 	sort.Slice(intent.Sources, func(i, j int) bool { return intent.Sources[i].Location < intent.Sources[j].Location })
+	if intent.Reports == nil {
+		intent.Reports = []GithubSubmissionReport{}
+	}
+	keys := make(map[string]bool, len(intent.Reports))
+	for index := range intent.Reports {
+		report := &intent.Reports[index]
+		if report.Key == "" || report.Key != strings.TrimSpace(report.Key) || !utf8.ValidString(report.Key) || keys[report.Key] {
+			return intent, ErrGithubSubmissionIntent
+		}
+		keys[report.Key] = true
+		payload, err := DecodeGithubReportCreatePayload(report.Payload)
+		if err != nil || payload.OrganisationID != intent.Graph.OrganisationID || payload.GithubInstallationID != intent.Graph.GithubInstallationID ||
+			payload.RepoOwner != intent.Graph.RepoOwner || payload.RepoName != intent.Graph.RepoName || payload.PullRequestNumber != intent.Graph.PullRequestNumber ||
+			(payload.ResourceKind == GithubReportResourceCheckRun && payload.HeadSHA != intent.Graph.CommitSHA) {
+			return intent, ErrGithubSubmissionIntent
+		}
+		report.Payload, err = CanonicalGithubReportCreatePayload(payload)
+		if err != nil {
+			return intent, ErrGithubSubmissionIntent
+		}
+	}
+	sort.Slice(intent.Reports, func(i, j int) bool { return intent.Reports[i].Key < intent.Reports[j].Key })
 	return intent, nil
 }
 
@@ -288,6 +318,12 @@ func validateGithubSubmissionEnvelope(tx *gorm.DB, identity JobCreationIdentity,
 			return ErrGithubSubmissionTenant
 		}
 		if connection.OrganisationID != orgID || connection.GithubId != delivery.GithubAppID || connection.VCSType != DiggerVCSGithub {
+			return ErrGithubSubmissionTenant
+		}
+	}
+	for _, report := range intent.Reports {
+		payload, err := DecodeGithubReportCreatePayload(report.Payload)
+		if err != nil || payload.GithubAppID != delivery.GithubAppID {
 			return ErrGithubSubmissionTenant
 		}
 	}
