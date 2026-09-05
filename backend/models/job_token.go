@@ -23,14 +23,19 @@ import (
 
 const GithubWorkflowDispatchEffectKind = "github_workflow_dispatch"
 
+// Leave room within the hosted-runner job limit for terminal reporting. This
+// deadline starts at first dispatch preparation and is never extended by retry.
+const DurableExecutionClaimWindow = 5 * time.Hour
+
 var ErrDurableJobDispatchClaim = errors.New("durable job dispatch is not owned by this outbox claim")
 var ErrDurableJobDispatchConflict = errors.New("durable job dispatch state does not match its bound operation")
 var ErrDurableJobDispatchNotReady = errors.New("durable job dispatch is not yet committed")
 
 type DurableJobDispatchPreparation struct {
-	Job          *DiggerJob
-	GithubAppID  int64
-	SkipProvider bool
+	Job            *DiggerJob
+	GithubAppID    int64
+	SkipProvider   bool
+	ClaimExpiresAt time.Time
 }
 
 type DurableExecutionClaimRequest struct {
@@ -554,9 +559,20 @@ func (db *Database) PrepareDurableJobDispatch(
 			return ErrDurableJobDispatchConflict
 		}
 
+		activatedAt := now
+		if state.Token.ActivatedAt != nil {
+			activatedAt = *state.Token.ActivatedAt
+		}
+		claimExpiresAt := activatedAt.Add(min(validity, DurableExecutionClaimWindow))
+		if !claimExpiresAt.After(now) {
+			return ErrDurableJobDispatchClaim
+		}
 		expiresAt := now.Add(validity)
 		if state.Token.Expiry.After(expiresAt) {
 			expiresAt = state.Token.Expiry
+		}
+		if claimExpiresAt.After(expiresAt) {
+			claimExpiresAt = expiresAt
 		}
 		updates := map[string]any{"expiry": expiresAt, "updated_at": now}
 		if state.Token.ActivatedAt == nil {
@@ -584,7 +600,7 @@ func (db *Database) PrepareDurableJobDispatch(
 			state.Job.Status = scheduler.DiggerJobTriggered
 			state.Job.StatusVersion = 1
 		}
-		preparation = &DurableJobDispatchPreparation{Job: &state.Job, GithubAppID: state.Delivery.GithubAppID}
+		preparation = &DurableJobDispatchPreparation{Job: &state.Job, GithubAppID: state.Delivery.GithubAppID, ClaimExpiresAt: claimExpiresAt}
 		return nil
 	})
 	return preparation, err
@@ -681,6 +697,9 @@ func (db *Database) ClaimDurableJobExecution(
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
+		if !dispatchReceipt.ClaimExpiresAt.After(now) {
+			return ErrDurableJobDispatchClaim
+		}
 		claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, state.Token.Expiry)
 		if err != nil {
 			return err
@@ -726,16 +745,17 @@ func (db *Database) ClaimDurableJobExecution(
 }
 
 type durableWorkflowDispatchProviderReceipt struct {
-	RepositoryID int64  `json:"repository_id"`
-	WorkflowID   int64  `json:"workflow_id"`
-	Accepted     bool   `json:"accepted"`
-	OperationID  string `json:"operation_id"`
-	TerminalNoop bool   `json:"terminal_noop"`
-	ControlRef   string `json:"control_ref"`
-	RunID        int64  `json:"run_id"`
-	RunAttempt   int    `json:"run_attempt"`
-	RunURL       string `json:"run_url"`
-	HeadSHA      string `json:"head_sha"`
+	ClaimExpiresAt time.Time `json:"claim_expires_at"`
+	RepositoryID   int64     `json:"repository_id"`
+	WorkflowID     int64     `json:"workflow_id"`
+	Accepted       bool      `json:"accepted"`
+	OperationID    string    `json:"operation_id"`
+	TerminalNoop   bool      `json:"terminal_noop"`
+	ControlRef     string    `json:"control_ref"`
+	RunID          int64     `json:"run_id"`
+	RunAttempt     int       `json:"run_attempt"`
+	RunURL         string    `json:"run_url"`
+	HeadSHA        string    `json:"head_sha"`
 }
 
 func decodeDurableWorkflowDispatchReceipt(payload []byte) (*durableWorkflowDispatchProviderReceipt, error) {
@@ -751,7 +771,7 @@ func decodeDurableWorkflowDispatchReceipt(payload []byte) (*durableWorkflowDispa
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("decode durable workflow dispatch receipt: trailing JSON")
 	}
-	if !operation.ID(receipt.OperationID).Valid() || receipt.RunID <= 0 || receipt.RunAttempt != 1 || receipt.RepositoryID <= 0 || receipt.WorkflowID <= 0 ||
+	if !operation.ID(receipt.OperationID).Valid() || receipt.ClaimExpiresAt.IsZero() || receipt.RunID <= 0 || receipt.RunAttempt != 1 || receipt.RepositoryID <= 0 || receipt.WorkflowID <= 0 ||
 		strings.TrimSpace(receipt.ControlRef) == "" || strings.TrimSpace(receipt.ControlRef) != receipt.ControlRef ||
 		!validLowerHexDigest(receipt.HeadSHA, 40) || strings.TrimSpace(receipt.RunURL) == "" {
 		return nil, ErrDurableJobDispatchClaim

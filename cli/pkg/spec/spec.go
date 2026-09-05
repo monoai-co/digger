@@ -53,10 +53,14 @@ func RunSpec(
 		usage.ReportErrorAndExit(spec.VCS.Actor, fmt.Sprintf("could not get backend api: %v", err), 1)
 	}
 	if spec.OperationID != "" {
+		if spec.ClaimExpiresAt == nil || spec.ClaimExpiresAt.IsZero() {
+			return fmt.Errorf("durable execution specification has no claim deadline")
+		}
 		claimRequest, err := backend2.BuildExecutionClaimRequest(spec.VCS.RepoFullname, spec.Job.ProjectName, spec.OperationID, spec.ProtocolVersion, spec.WriterEpoch)
 		if err != nil {
 			return fmt.Errorf("build execution claim: %w", err)
 		}
+		claimRequest.ClaimExpiresAt = *spec.ClaimExpiresAt
 		claimer, ok := backendApi.(backend2.ContextExecutionClaimer)
 		if !ok {
 			return fmt.Errorf("backend does not support cancellable execution claims")

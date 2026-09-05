@@ -258,15 +258,16 @@ func prepareDurableExecutionClaimForRequestTest(t *testing.T, database *models.D
 func durableGraphDispatchReceipt(t *testing.T, operationID string, runID int64, headSHA string) []byte {
 	t.Helper()
 	receipt, err := json.Marshal(map[string]any{
-		"repository_id": 12345,
-		"workflow_id":   42,
-		"accepted":      true,
-		"operation_id":  operationID,
-		"control_ref":   "main",
-		"run_id":        runID,
-		"run_attempt":   1,
-		"run_url":       fmt.Sprintf("https://github.com/monoai-co/sre/actions/runs/%d", runID),
-		"head_sha":      headSHA,
+		"claim_expires_at": time.Now().UTC().Add(time.Hour),
+		"repository_id":    12345,
+		"workflow_id":      42,
+		"accepted":         true,
+		"operation_id":     operationID,
+		"control_ref":      "main",
+		"run_id":           runID,
+		"run_attempt":      1,
+		"run_url":          fmt.Sprintf("https://github.com/monoai-co/sre/actions/runs/%d", runID),
+		"head_sha":         headSHA,
 	})
 	require.NoError(t, err)
 	return receipt
@@ -455,6 +456,43 @@ func TestClaimDurableJobExecutionRejectsDifferentAttestedRepository(t *testing.T
 	require.NoError(t, database.GormDB.First(job, "id = ?", job.ID).Error)
 	require.Equal(t, scheduler.DiggerJobTriggered, job.Status)
 	require.Equal(t, int64(1), job.StatusVersion)
+}
+
+func TestClaimDeadlineRejectsNewGrantButPreservesCommittedReplay(t *testing.T) {
+	for _, grantBeforeExpiry := range []bool{false, true} {
+		t.Run(fmt.Sprintf("already-granted-%t", grantBeforeExpiry), func(t *testing.T) {
+			database, organisation, delivery := newDurableGraphTestDatabase(t)
+			job, request, token := prepareDurableExecutionClaimTest(t, database, organisation, delivery)
+			secrets := durableGraphTestGrantSecrets([]byte(strings.Repeat("grant-secret-", 3)))
+			var original *models.DurableExecutionClaimReceipt
+			var err error
+			if grantBeforeExpiry {
+				original, err = database.ClaimDurableJobExecution(context.Background(), request, token, secrets, durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+				require.NoError(t, err)
+			}
+			var effect models.OutboxEffect
+			require.NoError(t, database.GormDB.First(&effect, "operation_id = ? AND effect_kind = ?", request.OperationID, models.GithubWorkflowDispatchEffectKind).Error)
+			var receipt map[string]any
+			require.NoError(t, json.Unmarshal(effect.ProviderReceipt, &receipt))
+			receipt["claim_expires_at"] = time.Now().UTC().Add(-time.Minute)
+			encoded, err := json.Marshal(receipt)
+			require.NoError(t, err)
+			require.NoError(t, database.GormDB.Model(&effect).Update("provider_receipt", encoded).Error)
+			got, err := database.ClaimDurableJobExecution(context.Background(), request, token, secrets, durableGraphTestGrantSigningKey, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
+			if grantBeforeExpiry {
+				require.NoError(t, err)
+				require.True(t, got.AlreadyGranted)
+				require.Equal(t, original.ExecutionGrant, got.ExecutionGrant)
+			} else {
+				require.ErrorIs(t, err, models.ErrDurableJobDispatchClaim)
+				var count int64
+				require.NoError(t, database.GormDB.Model(&models.ExecutionClaimAttempt{}).Count(&count).Error)
+				require.Zero(t, count)
+				require.NoError(t, database.GormDB.First(job, "id = ?", job.ID).Error)
+				require.Equal(t, scheduler.DiggerJobTriggered, job.Status)
+			}
+		})
+	}
 }
 
 func TestClaimDurableJobExecutionRejectsUncommittedRunAttemptBeforeMutation(t *testing.T) {

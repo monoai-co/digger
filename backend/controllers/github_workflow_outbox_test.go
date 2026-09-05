@@ -139,7 +139,8 @@ func githubWorkflowDispatchTestPreparation(t *testing.T) *models.DurableJobDispa
 	require.NoError(t, err)
 	batchIDString := batchID.String()
 	return &models.DurableJobDispatchPreparation{
-		GithubAppID: 456,
+		ClaimExpiresAt: time.Now().Add(time.Hour),
+		GithubAppID:    456,
 		Job: &models.DiggerJob{
 			DiggerJobID:       "job-public-id",
 			OperationID:       &operationValue,

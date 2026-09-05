@@ -2,6 +2,7 @@ package spec
 
 import (
 	"github.com/diggerhq/digger/libs/scheduler"
+	"time"
 )
 
 type ReporterSpec struct {
@@ -53,14 +54,15 @@ const SpecTypeManualJob SpecType = "manual_job"
 
 type Spec struct {
 	// TODO: replace these three to be nested into one of the other specs
-	SpecType        SpecType `json:"spec_type"`
-	JobId           string   `json:"job_id"`
-	CommentId       string   `json:"comment_id"`
-	RunName         string   `json:"run_name"`
-	OperationID     string   `json:"operation_id,omitempty"`
-	ProtocolVersion int      `json:"protocol_version,omitempty"`
-	WriterEpoch     int64    `json:"writer_epoch,omitempty"`
-	ExecutionGrant  string   `json:"execution_grant,omitempty"`
+	SpecType        SpecType   `json:"spec_type"`
+	JobId           string     `json:"job_id"`
+	CommentId       string     `json:"comment_id"`
+	RunName         string     `json:"run_name"`
+	OperationID     string     `json:"operation_id,omitempty"`
+	ProtocolVersion int        `json:"protocol_version,omitempty"`
+	WriterEpoch     int64      `json:"writer_epoch,omitempty"`
+	ExecutionGrant  string     `json:"execution_grant,omitempty"`
+	ClaimExpiresAt  *time.Time `json:"claim_expires_at,omitempty"`
 
 	Job            scheduler.JobJson  `json:"job"`
 	Reporter       ReporterSpec       `json:"reporter"`

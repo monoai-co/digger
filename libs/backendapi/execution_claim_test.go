@@ -152,6 +152,7 @@ func TestDiggerApiDurableStatusCallbackRetriesStableIdentityAndBody(t *testing.T
 		oidcTokenProvider:        func(context.Context, string) (string, error) { return "test-oidc-token", nil },
 	}
 	claimRequest := ExecutionClaimRequest{
+		ClaimExpiresAt:      time.Now().Add(time.Hour),
 		RepositoryFullName:  "monoai-co/repo",
 		ProjectName:         "root",
 		OperationID:         "op1_" + strings.Repeat("a", 64),

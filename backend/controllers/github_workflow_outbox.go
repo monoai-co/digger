@@ -60,7 +60,10 @@ func NewGithubWorkflowOutboxDispatch(
 		job := preparation.Job
 		batch := job.Batch
 		if preparation.SkipProvider {
-			return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, true, "", nil)
+			return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, true, "", nil, time.Time{})
+		}
+		if preparation.ClaimExpiresAt.IsZero() {
+			return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
 		}
 		client, _, err := githubClientProvider.GetContext(ctx, preparation.GithubAppID, batch.GithubInstallationId)
 		if err != nil {
@@ -74,6 +77,7 @@ func NewGithubWorkflowOutboxDispatch(
 		workflowSpec.OperationID = *preparation.Job.OperationID
 		workflowSpec.ProtocolVersion = job.ProtocolVersion
 		workflowSpec.WriterEpoch = *job.WriterEpoch
+		workflowSpec.ClaimExpiresAt = &preparation.ClaimExpiresAt
 		runName, err := services.GetRunNameFromJob(*job)
 		if err != nil {
 			return OutboxDispatchResult{}, err
@@ -96,7 +100,7 @@ func NewGithubWorkflowOutboxDispatch(
 			return OutboxDispatchResult{}, fmt.Errorf("%w: returned workflow run does not match dispatch", ErrOutboxDispatchPermanent)
 		}
 		run.HTMLURL = github.String(fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", workflowSpec.VCS.RepoOwner, workflowSpec.VCS.RepoName, details.RunID))
-		return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, false, controlRef, run)
+		return durableWorkflowDispatchReceipt(*preparation.Job.OperationID, false, controlRef, run, preparation.ClaimExpiresAt)
 	}, nil
 }
 
@@ -110,21 +114,22 @@ func sameDurableWorkflowRun(run *github.WorkflowRun, runID int64, target *ci_bac
 		run.GetEvent() == "workflow_dispatch" && run.GetHeadBranch() == target.ControlRef && workflowDigest.MatchString(run.GetHeadSHA())
 }
 
-func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, controlRef string, run *github.WorkflowRun) (OutboxDispatchResult, error) {
-	if !terminalNoop && (run == nil || run.GetID() <= 0 || controlRef == "") {
+func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, controlRef string, run *github.WorkflowRun, claimExpiresAt time.Time) (OutboxDispatchResult, error) {
+	if !terminalNoop && (run == nil || run.GetID() <= 0 || controlRef == "" || claimExpiresAt.IsZero()) {
 		return OutboxDispatchResult{}, models.ErrDurableJobDispatchConflict
 	}
 	receipt := struct {
-		Accepted     bool   `json:"accepted"`
-		OperationID  string `json:"operation_id"`
-		TerminalNoop bool   `json:"terminal_noop,omitempty"`
-		ControlRef   string `json:"control_ref,omitempty"`
-		RunID        int64  `json:"run_id,omitempty"`
-		RunAttempt   int    `json:"run_attempt,omitempty"`
-		RunURL       string `json:"run_url,omitempty"`
-		HeadSHA      string `json:"head_sha,omitempty"`
-		RepositoryID int64  `json:"repository_id,omitempty"`
-		WorkflowID   int64  `json:"workflow_id,omitempty"`
+		ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
+		Accepted       bool       `json:"accepted"`
+		OperationID    string     `json:"operation_id"`
+		TerminalNoop   bool       `json:"terminal_noop,omitempty"`
+		ControlRef     string     `json:"control_ref,omitempty"`
+		RunID          int64      `json:"run_id,omitempty"`
+		RunAttempt     int        `json:"run_attempt,omitempty"`
+		RunURL         string     `json:"run_url,omitempty"`
+		HeadSHA        string     `json:"head_sha,omitempty"`
+		RepositoryID   int64      `json:"repository_id,omitempty"`
+		WorkflowID     int64      `json:"workflow_id,omitempty"`
 	}{
 		Accepted:     !terminalNoop,
 		OperationID:  operationID,
@@ -132,6 +137,7 @@ func durableWorkflowDispatchReceipt(operationID string, terminalNoop bool, contr
 		ControlRef:   controlRef,
 	}
 	if run != nil {
+		receipt.ClaimExpiresAt = &claimExpiresAt
 		receipt.RunID = run.GetID()
 		receipt.RunAttempt = run.GetRunAttempt()
 		receipt.RunURL = run.GetHTMLURL()

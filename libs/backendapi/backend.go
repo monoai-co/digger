@@ -20,18 +20,21 @@ type Api interface {
 }
 
 type ExecutionClaimRequest struct {
-	RepositoryFullName  string `json:"repository_full_name"`
-	ProjectName         string `json:"project_name"`
-	OperationID         string `json:"operation_id"`
-	RunID               int64  `json:"run_id"`
-	RunAttempt          int64  `json:"run_attempt"`
-	WorkflowRef         string `json:"workflow_ref"`
-	WorkflowSHA         string `json:"workflow_sha"`
-	ActionRef           string `json:"action_ref"`
-	CLISHA256           string `json:"cli_sha256"`
-	ProtocolVersion     int    `json:"protocol_version"`
-	DispatchWriterEpoch int64  `json:"dispatch_writer_epoch"`
-	OIDCToken           string `json:"oidc_token,omitempty"`
+	// Local retry budget supplied by the dispatched specification; the server
+	// independently enforces its committed receipt's deadline.
+	ClaimExpiresAt      time.Time `json:"-"`
+	RepositoryFullName  string    `json:"repository_full_name"`
+	ProjectName         string    `json:"project_name"`
+	OperationID         string    `json:"operation_id"`
+	RunID               int64     `json:"run_id"`
+	RunAttempt          int64     `json:"run_attempt"`
+	WorkflowRef         string    `json:"workflow_ref"`
+	WorkflowSHA         string    `json:"workflow_sha"`
+	ActionRef           string    `json:"action_ref"`
+	CLISHA256           string    `json:"cli_sha256"`
+	ProtocolVersion     int       `json:"protocol_version"`
+	DispatchWriterEpoch int64     `json:"dispatch_writer_epoch"`
+	OIDCToken           string    `json:"oidc_token,omitempty"`
 }
 
 type ExecutionClaimResponse struct {

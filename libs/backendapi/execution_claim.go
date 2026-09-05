@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/diggerhq/digger/libs/operation"
 )
+
+var errGithubOIDCUnavailable = errors.New("GitHub OIDC token service temporarily unavailable")
 
 func BuildExecutionClaimRequest(repositoryFullName string, projectName string, operationID string, protocolVersion int, writerEpoch int64) (ExecutionClaimRequest, error) {
 	runID, err := positiveEnvironmentInt64("GITHUB_RUN_ID")
@@ -95,8 +98,19 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 	claimClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	client = &claimClient
 	deadline := time.Now().Add(2 * time.Minute)
+	if request.ProtocolVersion >= operation.OIDCProtocolVersion {
+		if request.ClaimExpiresAt.IsZero() {
+			return nil, fmt.Errorf("durable execution claim has no deadline")
+		}
+		deadline = request.ClaimExpiresAt
+	}
+	ctx, cancelClaims := context.WithDeadline(ctx, deadline)
+	defer cancelClaims()
 	retryDelay := 200 * time.Millisecond
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if request.ProtocolVersion >= operation.OIDCProtocolVersion {
 			audience, err := operation.ExecutionClaimAudience(request.OperationID, jobID)
 			if err != nil {
@@ -104,7 +118,14 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 			}
 			request.OIDCToken, err = d.githubOIDCToken(ctx, client, audience)
 			if err != nil {
-				return nil, err
+				if !errors.Is(err, errGithubOIDCUnavailable) {
+					return nil, err
+				}
+				if err := waitExecutionClaimRetry(ctx, retryDelay); err != nil {
+					return nil, err
+				}
+				retryDelay = min(2*retryDelay, 2*time.Second)
+				continue
 			}
 		}
 		payload, err := json.Marshal(request)
@@ -160,18 +181,14 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 			response.Body.Close()
 		}
 		cancelRequest()
-		if !retryable || time.Now().Add(retryDelay).After(deadline) {
+		if !retryable {
 			if requestErr != nil {
 				return nil, fmt.Errorf("send execution claim: %w", requestErr)
 			}
 			return nil, fmt.Errorf("execution claim rejected with status %d", responseStatus)
 		}
-		retryTimer := time.NewTimer(retryDelay)
-		select {
-		case <-ctx.Done():
-			retryTimer.Stop()
-			return nil, ctx.Err()
-		case <-retryTimer.C:
+		if err := waitExecutionClaimRetry(ctx, retryDelay); err != nil {
+			return nil, err
 		}
 		if retryDelay < 2*time.Second {
 			retryDelay *= 2
@@ -179,6 +196,17 @@ func (d *DiggerApi) ClaimProjectJobExecutionContext(ctx context.Context, repo st
 				retryDelay = 2 * time.Second
 			}
 		}
+	}
+}
+
+func waitExecutionClaimRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -225,10 +253,13 @@ func (d *DiggerApi) githubOIDCToken(ctx context.Context, client *http.Client, au
 	oidcClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := oidcClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request GitHub Actions OIDC token: %w", err)
+		return "", fmt.Errorf("%w: request failed", errGithubOIDCUnavailable)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			return "", errGithubOIDCUnavailable
+		}
 		return "", fmt.Errorf("GitHub Actions OIDC token endpoint returned status %d", response.StatusCode)
 	}
 	var body struct {
@@ -236,7 +267,7 @@ func (d *DiggerApi) githubOIDCToken(ctx context.Context, client *http.Client, au
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64*1024))
 	if err := decoder.Decode(&body); err != nil {
-		return "", fmt.Errorf("decode GitHub Actions OIDC token response: %w", err)
+		return "", fmt.Errorf("%w: incomplete token response", errGithubOIDCUnavailable)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return "", fmt.Errorf("decode GitHub Actions OIDC token response: trailing JSON")

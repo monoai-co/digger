@@ -46,6 +46,7 @@ func TestExecutionClaimRefreshesOIDCForEachRetry(t *testing.T) {
 	api := &DiggerApi{DiggerHost: server.URL, AuthToken: "job-token", HttpClient: server.Client()}
 	_, err = api.ClaimProjectJobExecutionContext(context.Background(), "monoai-co/sre", "root", "job-1", ExecutionClaimRequest{
 		RepositoryFullName: "monoai-co/sre", ProjectName: "root", OperationID: operationID, ProtocolVersion: operation.OIDCProtocolVersion,
+		ClaimExpiresAt: time.Now().Add(time.Hour),
 	})
 	require.NoError(t, err)
 	require.Equal(t, int32(2), oidcCalls.Load())
@@ -127,4 +128,36 @@ func TestExecutionClaimRetriesTruncatedCommittedResponse(t *testing.T) {
 	require.Equal(t, grant.ExecutionGrant, receipt.ExecutionGrant)
 	require.Equal(t, grant.SigningKeyID, receipt.SigningKeyID)
 	require.True(t, grant.GrantExpiresAt.Equal(receipt.GrantExpiresAt))
+}
+
+func TestExecutionClaimUsesPersistedDeadlineAndRetriesOIDCOutage(t *testing.T) {
+	var calls atomic.Int32
+	deadline := time.Now().Add(3 * time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := &DiggerApi{DiggerHost: "https://unused.test", oidcTokenProvider: func(ctx context.Context, _ string) (string, error) {
+		actual, ok := ctx.Deadline()
+		require.True(t, ok)
+		require.True(t, deadline.Equal(actual))
+		if calls.Add(1) == 2 {
+			cancel()
+		}
+		return "", errGithubOIDCUnavailable
+	}}
+	_, err := api.ClaimProjectJobExecutionContext(ctx, "monoai-co/sre", "root", "job-1", ExecutionClaimRequest{
+		RepositoryFullName: "monoai-co/sre", ProjectName: "root", OperationID: "op1_" + strings.Repeat("a", 64), ProtocolVersion: 2, ClaimExpiresAt: deadline,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, int32(2), calls.Load())
+}
+
+func TestExecutionClaimRejectsExpiredDeadlineBeforeRequestingOIDC(t *testing.T) {
+	api := &DiggerApi{DiggerHost: "https://unused.test", oidcTokenProvider: func(context.Context, string) (string, error) {
+		t.Error("OIDC requested after claim expired")
+		return "", nil
+	}}
+	_, err := api.ClaimProjectJobExecution("monoai-co/sre", "root", "job-1", ExecutionClaimRequest{
+		RepositoryFullName: "monoai-co/sre", ProjectName: "root", ProtocolVersion: 2, ClaimExpiresAt: time.Now().Add(-time.Second),
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
