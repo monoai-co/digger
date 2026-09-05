@@ -43,7 +43,7 @@ func loadGithubSubmissionConfig(ctx context.Context, provider utils.ContextGithu
 	if client == nil || token == nil || *token == "" {
 		return nil, errors.New("submission configuration requires an installation client and token")
 	}
-	prepared := &githubSubmissionConfig{Service: &githubci.GithubService{Client: githubClientWithoutRedirects(client), Owner: target.RepoOwner, RepoName: target.RepoName}}
+	prepared := &githubSubmissionConfig{Service: &githubci.GithubService{Client: githubClientForContext(ctx, client), Owner: target.RepoOwner, RepoName: target.RepoName}}
 	err = git_utils.CloneComparisonAndDoAction(ctx, cloneURL, target.BaseSHA, target.HeadSHA, *token, "", func(directory string, changedFiles []string) error {
 		content, err := digger_config.ReadDiggerYmlFileContents(directory)
 		if err != nil {
