@@ -25,6 +25,8 @@
 - `newDurableExecutionIntegrationDatabase` seeds an in-flight delivery. Complete
   that fixture delivery before claiming another for the same installation;
   ordering is installation-wide, not repository-local.
+- Delivery fixtures must record replacement payloads through inbox admission,
+  not update an existing receipt: the control operation also binds its digest.
 - For GORM relations whose foreign and referenced field names coincide, declare
   `belongsTo` explicitly. Otherwise AutoMigrate can infer the reverse foreign key;
   verify both PostgreSQL migration output and the SQLite test schema.

@@ -2,7 +2,10 @@ package utils
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/diggerhq/digger/backend/models"
+	"github.com/google/go-github/v61/github"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -27,6 +31,33 @@ func newGithubSubmissionFixture(t *testing.T) (*models.Database, DurableJobGraph
 	statement = strings.ReplaceAll(statement, "public.", schema+".")
 	require.NoError(t, database.GormDB.Transaction(func(tx *gorm.DB) error { return tx.Exec(statement).Error }))
 	request := durableGraphTestRequest(t, organisation, delivery)
+	targetMigration, err := os.ReadFile("../migrations/20260905050000_github_delivery_targets.sql")
+	require.NoError(t, err)
+	statement = strings.ReplaceAll(string(targetMigration), `"public"`, `"`+schema+`"`)
+	statement = strings.ReplaceAll(statement, "public.", schema+".")
+	require.NoError(t, database.GormDB.Transaction(func(tx *gorm.DB) error { return tx.Exec(statement).Error }))
+	repository := &github.Repository{ID: github.Int64(12345), Name: github.String(request.RepoName), FullName: github.String(request.RepoFullName), Owner: &github.User{Login: github.String(request.RepoOwner)}}
+	event := github.PullRequestEvent{Repo: repository, Installation: &github.Installation{ID: delivery.InstallationID}, PullRequest: &github.PullRequest{
+		Number: github.Int(request.PullRequestNumber), Base: &github.PullRequestBranch{Repo: repository}, Head: &github.PullRequestBranch{SHA: github.String(request.CommitSHA), Ref: github.String(request.Branch)},
+	}}
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	require.NoError(t, database.CompleteGithubWebhookDelivery(context.Background(), delivery.DeliveryID, delivery.LeaseID, models.GithubWebhookDeliveryIgnored, "fixture_only", time.Now().UTC(), request.Identity.DatabaseIdentity, request.Identity.WriterEpoch))
+	_, _, err = database.RecordGithubWebhookDelivery(context.Background(), &models.GithubWebhookDelivery{
+		DeliveryID: "submission-delivery", Payload: payload, PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(payload)), EventType: "pull_request",
+		GithubAppID: delivery.GithubAppID, InstallationID: delivery.InstallationID, RepositoryFullName: delivery.RepositoryFullName,
+	}, request.Identity.DatabaseIdentity, request.Identity.WriterEpoch)
+	require.NoError(t, err)
+	delivery, err = database.ClaimNextGithubWebhookDelivery(context.Background(), time.Now().UTC(), "submission-lease", time.Minute, request.Identity.DatabaseIdentity, request.Identity.WriterEpoch)
+	require.NoError(t, err)
+	require.NotNil(t, delivery)
+	request = durableGraphTestRequest(t, organisation, delivery)
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(delivery)
+	require.NoError(t, err)
+	target, err := preparation.Resolve(nil)
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), request.Identity, target)
+	require.NoError(t, err)
 	graph, err := PrepareDurableGraphIntent(request)
 	require.NoError(t, err)
 	return database, request, models.GithubSubmissionIntent{Graph: *graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-two", "root-one"}}}}
@@ -84,6 +115,40 @@ func TestPostgresGithubSubmissionConcurrentPreparationCreatesOneReceipt(t *testi
 	var count int64
 	require.NoError(t, database.GormDB.Model(&models.GithubSubmission{}).Count(&count).Error)
 	require.EqualValues(t, 1, count)
+}
+
+func TestPostgresGithubSubmissionRejectsDifferentSelectedTarget(t *testing.T) {
+	for _, field := range []string{"pull request", "commit", "branch"} {
+		t.Run(field, func(t *testing.T) {
+			database, request, intent := newGithubSubmissionFixture(t)
+			changed := request
+			switch field {
+			case "pull request":
+				changed.PullRequestNumber++
+				changed.Jobs = maps.Clone(request.Jobs)
+				for name, job := range changed.Jobs {
+					job.PullRequestNumber = &changed.PullRequestNumber
+					changed.Jobs[name] = job
+				}
+			case "commit":
+				changed.CommitSHA = "different-commit"
+			case "branch":
+				changed.Branch = "different-branch"
+			}
+			graph, err := PrepareDurableGraphIntent(changed)
+			require.NoError(t, err)
+			invalid := intent
+			invalid.Graph = *graph
+			_, _, err = database.RecordGithubSubmission(context.Background(), request.Identity, invalid)
+			require.ErrorIs(t, err, models.ErrGithubDeliveryTargetConflict)
+			var count int64
+			require.NoError(t, database.GormDB.Model(&models.GithubSubmission{}).Count(&count).Error)
+			require.Zero(t, count)
+			_, created, err := database.RecordGithubSubmission(context.Background(), request.Identity, intent)
+			require.NoError(t, err)
+			require.True(t, created)
+		})
+	}
 }
 
 func TestPostgresGithubSubmissionRejectsChangedTenantAndDeliveryPayload(t *testing.T) {

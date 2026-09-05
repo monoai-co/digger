@@ -291,6 +291,25 @@ func validateGithubSubmissionEnvelope(tx *gorm.DB, identity JobCreationIdentity,
 			return ErrGithubSubmissionTenant
 		}
 	}
+	preparation, err := PrepareGithubDeliveryTargetIntent(delivery)
+	if err != nil {
+		return err
+	}
+	var target GithubDeliveryTarget
+	if err := tx.First(&target, "delivery_operation_id = ?", identity.DeliveryOperationID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrGithubDeliveryTargetNotFound
+		}
+		return err
+	}
+	if err := validateStoredGithubDeliveryTarget(identity, &target, delivery, orgID, preparation); err != nil {
+		return err
+	}
+	selected, err := DecodeGithubDeliveryTarget(target.Target)
+	if err != nil || graph.PullRequestNumber != selected.PullRequestNumber || graph.CommitSHA != selected.HeadSHA ||
+		graph.Branch != selected.HeadRef || graph.RepoOwner != selected.RepoOwner || graph.RepoName != selected.RepoName {
+		return ErrGithubDeliveryTargetConflict
+	}
 	return nil
 }
 
