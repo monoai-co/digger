@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"context"
 	"crypto/hmac"
 	"embed"
 	"encoding/json"
@@ -172,22 +171,7 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		})
 	})
 
-	r.GET("/ready", func(c *gin.Context) {
-		readyCtx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-		defer cancel()
-		if diggerController.ExecutionGrantSigningKeyID != "" {
-			if err := diggerController.ExecutionClaimsReady(readyCtx); err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "execution_keys_not_ready"})
-				return
-			}
-		}
-		if err := githubWebhookProcessor.Ready(readyCtx); err != nil {
-			slog.Error("GitHub webhook inbox is not ready", "error", err)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready"})
-	})
+	r.GET("/ready", controlPlaneReadinessHandler(diggerController, githubWebhookProcessor))
 
 	r.SetFuncMap(template.FuncMap{
 		"formatAsDate": func(msec int64) time.Time {
