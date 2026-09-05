@@ -178,8 +178,11 @@ func (d *OutboxDispatcher) Wake() {
 	}
 }
 
-func (d *OutboxDispatcher) Shutdown(ctx context.Context) error {
+// StopClaims prevents another effect from being claimed without waiting for
+// already-owned provider work to finish.
+func (d *OutboxDispatcher) StopClaims() {
 	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	if !d.started {
 		if !d.stopped {
 			d.stopped = true
@@ -187,15 +190,32 @@ func (d *OutboxDispatcher) Shutdown(ctx context.Context) error {
 			d.cancelClaims()
 			close(d.doneCh)
 		}
-		d.lifecycleMu.Unlock()
-		return nil
+		return
 	}
 	if !d.stopped {
 		d.stopped = true
 		close(d.stopCh)
 		d.cancelClaims()
 	}
-	d.lifecycleMu.Unlock()
+}
+
+func (d *OutboxDispatcher) Ready(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	if !d.started || d.stopped {
+		return errors.New("outbox dispatcher is not running")
+	}
+	if d.config.Enabled && d.activeWorkers.Load() != int32(d.config.Workers) {
+		return errors.New("outbox dispatch workers are not ready")
+	}
+	return nil
+}
+
+func (d *OutboxDispatcher) Shutdown(ctx context.Context) error {
+	d.StopClaims()
 	select {
 	case <-d.doneCh:
 		return nil

@@ -144,6 +144,12 @@ func normalizeGithubWebhookProcessorConfig(config GithubWebhookProcessorConfig) 
 func (p *GithubWebhookProcessor) Start() {
 	p.startOnce.Do(func() {
 		p.started.Store(true)
+		select {
+		case <-p.stopCh:
+			close(p.doneCh)
+			return
+		default:
+		}
 		if !p.config.Enabled {
 			close(p.doneCh)
 			return
@@ -222,6 +228,15 @@ func (p *GithubWebhookProcessor) Wake() {
 	}
 }
 
+// StopClaims leaves already-owned delivery handlers running while preventing
+// further queue claims. Receipt admission is stopped separately.
+func (p *GithubWebhookProcessor) StopClaims() {
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+		p.cancelClaims()
+	})
+}
+
 func (p *GithubWebhookProcessor) Shutdown(ctx context.Context) error {
 	p.Start()
 	admissionsDrained := p.StopAdmission()
@@ -230,10 +245,7 @@ func (p *GithubWebhookProcessor) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	p.stopOnce.Do(func() {
-		close(p.stopCh)
-		p.cancelClaims()
-	})
+	p.StopClaims()
 
 	select {
 	case <-p.doneCh:
@@ -421,6 +433,11 @@ func (p *GithubWebhookProcessor) RequeueDeadLetter(ctx context.Context, delivery
 }
 
 func (p *GithubWebhookProcessor) Ready(ctx context.Context) error {
+	select {
+	case <-p.stopCh:
+		return ErrGithubWebhookProcessorStopping
+	default:
+	}
 	if !p.started.Load() {
 		return errors.New("github webhook workers have not started")
 	}

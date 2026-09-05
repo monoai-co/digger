@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"crypto/hmac"
 	"embed"
 	"encoding/json"
@@ -100,7 +101,7 @@ func cleanupOldProfiles(dir string, keep int) {
 	}
 }
 
-func Bootstrap(templates embed.FS, diggerController controllers.DiggerController) (*gin.Engine, *controllers.GithubWebhookProcessor) {
+func Bootstrap(templates embed.FS, diggerController controllers.DiggerController) (*gin.Engine, *ControlPlaneRuntime, error) {
 	defer segment.CloseClient()
 	logging.Init()
 	cfg := config.DiggerConfig
@@ -135,17 +136,13 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		os.Getenv("DIGGER_EXECUTION_GRANT_KEYRING"),
 	)
 	if executionGrantSecretsErr != nil {
-		slog.Error("Execution grant keyring configuration is invalid", "error", executionGrantSecretsErr)
-	} else {
-		diggerController.ExecutionGrantSecrets = executionGrantSecrets
+		return nil, nil, fmt.Errorf("execution grant keyring configuration: %w", executionGrantSecretsErr)
 	}
-	githubWebhookProcessor := controllers.NewGithubWebhookProcessor(
-		models.DB,
-		diggerController.ProcessGithubWebhookDelivery,
-		githubWebhookProcessorConfig(),
-	)
-	diggerController.GithubWebhookProcessor = githubWebhookProcessor
-	githubWebhookProcessor.Start()
+	diggerController.ExecutionGrantSecrets = executionGrantSecrets
+	controlPlane, err := newControlPlaneRuntime(&diggerController, models.DB, githubWebhookProcessorConfig())
+	if err != nil {
+		return nil, nil, err
+	}
 
 	r := gin.Default()
 
@@ -171,7 +168,7 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		})
 	})
 
-	r.GET("/ready", controlPlaneReadinessHandler(diggerController, githubWebhookProcessor))
+	r.GET("/ready", controlPlaneReadinessHandler(controlPlane))
 
 	r.SetFuncMap(template.FuncMap{
 		"formatAsDate": func(msec int64) time.Time {
@@ -308,7 +305,12 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 		policyApiGroup.PUT("/", controllers.PolicyOrgUpsertApi)
 	}
 
-	return r, githubWebhookProcessor
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStartup()
+	if err := controlPlane.Start(startupCtx); err != nil {
+		return nil, nil, fmt.Errorf("start control-plane workers: %w", err)
+	}
+	return r, controlPlane, nil
 }
 
 func buildExecutionGrantSecrets(activeKeyID string, activeSecret string, encodedKeyring string) (map[string][]byte, error) {

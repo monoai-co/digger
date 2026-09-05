@@ -44,7 +44,11 @@ func main() {
 		GithubWebhookPostIssueCommentHooks: []ce_controllers.IssueCommentHook{hooks.DriftReconcilliationHook},
 	}
 
-	r, githubWebhookProcessor := bootstrap.Bootstrap(templates, diggerController)
+	r, controlPlane, err := bootstrap.Bootstrap(templates, diggerController)
+	if err != nil {
+		log.Printf("backend startup failed: %v", err)
+		os.Exit(1)
+	}
 	cfg := config.DiggerConfig
 
 	eeController := controllers.DiggerEEController{
@@ -114,7 +118,7 @@ func main() {
 	port := config.GetPort()
 	processCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := bootstrap.RunServer(processCtx, r, port, githubWebhookProcessor, 50*time.Second); err != nil {
+	if err := bootstrap.RunServer(processCtx, r, port, controlPlane, 50*time.Second); err != nil {
 		log.Printf("backend server stopped with an error: %v", err)
 		os.Exit(1)
 	}

@@ -41,7 +41,7 @@ func (t *httpHandlerTracker) Wait(ctx context.Context) error {
 }
 
 // RunServer serves until the process context is cancelled, then stops HTTP
-// admission before draining the durable webhook workers.
+// admission before draining the control-plane workers.
 func RunServer(ctx context.Context, handler http.Handler, port int, drainer gracefulDrainer, shutdownTimeout time.Duration) error {
 	trackedHandler := &httpHandlerTracker{handler: handler}
 	server := &http.Server{
@@ -61,7 +61,8 @@ func RunServer(ctx context.Context, handler http.Handler, port int, drainer grac
 			defer cancel()
 			closeErr := server.Close()
 			if handlerErr := trackedHandler.Wait(shutdownCtx); handlerErr != nil {
-				return errors.Join(err, closeErr, fmt.Errorf("drain accepted HTTP handlers: %w", handlerErr))
+				drainer.StopAdmission()
+				return errors.Join(err, closeErr, fmt.Errorf("drain accepted HTTP handlers: %w", handlerErr), drainer.Shutdown(shutdownCtx))
 			}
 			drainer.StopAdmission()
 			return errors.Join(err, closeErr, drainer.Shutdown(shutdownCtx))
@@ -72,7 +73,7 @@ func RunServer(ctx context.Context, handler http.Handler, port int, drainer grac
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	slog.Info("Stopping HTTP admission and draining GitHub webhook workers", "timeout", shutdownTimeout)
+	slog.Info("Stopping HTTP admission and draining control-plane workers", "timeout", shutdownTimeout)
 	httpBudget := shutdownTimeout / 4
 	if httpBudget > 10*time.Second {
 		httpBudget = 10 * time.Second
@@ -89,13 +90,14 @@ func RunServer(ctx context.Context, handler http.Handler, port int, drainer grac
 		httpErr = errors.Join(httpErr, server.Close())
 	}
 	if handlerErr := trackedHandler.Wait(shutdownCtx); handlerErr != nil {
-		return errors.Join(httpErr, fmt.Errorf("drain accepted HTTP handlers: %w", handlerErr))
+		drainer.StopAdmission()
+		return errors.Join(httpErr, fmt.Errorf("drain accepted HTTP handlers: %w", handlerErr), drainer.Shutdown(shutdownCtx))
 	}
 	drainer.StopAdmission()
 	drainErr := drainer.Shutdown(shutdownCtx)
 	if httpErr != nil || drainErr != nil {
 		return errors.Join(httpErr, drainErr)
 	}
-	slog.Info("HTTP server and GitHub webhook workers drained")
+	slog.Info("HTTP server and control-plane workers drained")
 	return nil
 }

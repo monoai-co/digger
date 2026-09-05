@@ -25,12 +25,16 @@ func main() {
 		GithubClientProvider:               utils.DiggerGithubRealClientProvider{},
 		GithubWebhookPostIssueCommentHooks: make([]controllers.IssueCommentHook, 0),
 	}
-	r, githubWebhookProcessor := bootstrap.Bootstrap(templates, ghController)
+	r, controlPlane, err := bootstrap.Bootstrap(templates, ghController)
+	if err != nil {
+		slog.Error("Backend startup failed", "error", err)
+		os.Exit(1)
+	}
 	r.GET("/", controllers.Home)
 	port := config.GetPort()
 	processCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := bootstrap.RunServer(processCtx, r, port, githubWebhookProcessor, 50*time.Second); err != nil {
+	if err := bootstrap.RunServer(processCtx, r, port, controlPlane, 50*time.Second); err != nil {
 		slog.Error("Backend server stopped with an error", "error", err)
 		os.Exit(1)
 	}
