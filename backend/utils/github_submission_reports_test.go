@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,4 +109,78 @@ func TestGithubSubmissionReportsRejectForeignTargetsAndDuplicateKeys(t *testing.
 		_, err = models.DecodeGithubSubmissionIntent(raw)
 		require.ErrorIs(t, err, models.ErrGithubSubmissionIntent, mutation)
 	}
+}
+
+func TestPostgresGithubSubmissionReportsEnqueueAtomicReplay(t *testing.T) {
+	database, request, intent := newGithubSubmissionFixture(t)
+	prepared, err := PrepareGithubSubmissionWithReports(intent, 456, time.Now().UTC())
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubSubmission(context.Background(), request.Identity, prepared)
+	require.NoError(t, err)
+	var workers sync.WaitGroup
+	failures := make(chan error, 8)
+	results := make(chan []*models.OutboxEffect, 8)
+	for index := 0; index < 8; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			effects, err := database.EnqueueGithubSubmissionReports(context.Background(), request.Identity)
+			failures <- err
+			results <- effects
+		}()
+	}
+	workers.Wait()
+	close(failures)
+	close(results)
+	for err := range failures {
+		require.NoError(t, err)
+	}
+	var first []*models.OutboxEffect
+	for effects := range results {
+		require.Len(t, effects, len(prepared.Reports))
+		if first == nil {
+			first = effects
+		}
+		for index, effect := range effects {
+			require.Equal(t, first[index].ID, effect.ID)
+			require.Equal(t, prepared.Reports[index].Key, effect.EffectKey)
+			require.True(t, effect.ValidPayloadDigest())
+		}
+	}
+	var count int64
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Count(&count).Error)
+	require.EqualValues(t, len(prepared.Reports), count)
+	identity := request.Identity
+	identity.WriterEpoch++
+	identity.DeliveryLeaseID = "report-manifest-handoff"
+	require.NoError(t, database.GormDB.Model(&models.ControlPlaneFence{}).Where("id = ?", models.ControlPlaneFenceSingletonID).Update("writer_epoch", identity.WriterEpoch).Error)
+	require.NoError(t, database.GormDB.Model(&models.GithubWebhookDelivery{}).Where("operation_id = ?", identity.DeliveryOperationID).Updates(map[string]any{"writer_epoch": identity.WriterEpoch, "lease_id": identity.DeliveryLeaseID}).Error)
+	replayed, err := database.EnqueueGithubSubmissionReports(context.Background(), identity)
+	require.NoError(t, err)
+	for index, effect := range replayed {
+		require.Equal(t, first[index].ID, effect.ID)
+	}
+}
+
+func TestPostgresGithubSubmissionReportsConflictRollsBackEntireManifest(t *testing.T) {
+	database, request, intent := newGithubSubmissionFixture(t)
+	prepared, err := PrepareGithubSubmissionWithReports(intent, 456, time.Now().UTC())
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubSubmission(context.Background(), request.Identity, prepared)
+	require.NoError(t, err)
+	last := prepared.Reports[len(prepared.Reports)-1]
+	payload, err := models.DecodeGithubReportCreatePayload(last.Payload)
+	require.NoError(t, err)
+	payload.Body = "Conflicting initial summary"
+	raw, err := models.CanonicalGithubReportCreatePayload(payload)
+	require.NoError(t, err)
+	conflicting := models.NewOutboxEffect(request.Identity.DeliveryOperationID, models.GithubReportCreateEffectKind, last.Key, raw, request.Identity.WriterEpoch, time.Now().UTC())
+	_, _, err = database.EnqueueOutboxEffect(context.Background(), conflicting, request.Identity.DatabaseIdentity, request.Identity.WriterEpoch)
+	require.NoError(t, err)
+	effects, err := database.EnqueueGithubSubmissionReports(context.Background(), request.Identity)
+	require.ErrorIs(t, err, models.ErrOutboxEffectConflict)
+	require.Nil(t, effects)
+	var count int64
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Count(&count).Error)
+	require.EqualValues(t, 1, count, "earlier inserts in the manifest must roll back")
 }

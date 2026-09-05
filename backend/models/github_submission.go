@@ -225,6 +225,44 @@ func (db *Database) GetGithubSubmission(ctx context.Context, identity JobCreatio
 	return &result, nil
 }
 
+// EnqueueGithubSubmissionReports publishes only the saved report manifest. The
+// complete set is inserted atomically under the current delivery lease.
+func (db *Database) EnqueueGithubSubmissionReports(ctx context.Context, identity JobCreationIdentity) ([]*OutboxEffect, error) {
+	effects := make([]*OutboxEffect, 0)
+	err := db.WithAuthoritativeWriteTx(ctx, identity.DatabaseIdentity, identity.WriterEpoch, false, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+		delivery, orgID, now, err := lockGithubPreparationDelivery(tx, identity)
+		if err != nil {
+			return err
+		}
+		var submission GithubSubmission
+		if err := tx.First(&submission, "delivery_operation_id = ?", identity.DeliveryOperationID).Error; err != nil {
+			return err
+		}
+		if err := validateStoredGithubSubmission(tx, identity, &submission, delivery, orgID); err != nil {
+			return err
+		}
+		intent, err := DecodeGithubSubmissionIntent(submission.Intent)
+		if err != nil {
+			return err
+		}
+		for _, report := range intent.Reports {
+			effect, _, err := EnqueueOutboxEffectTx(tx, NewOutboxEffect(identity.DeliveryOperationID, GithubReportCreateEffectKind, report.Key, report.Payload, identity.WriterEpoch, now))
+			if err != nil {
+				return err
+			}
+			if !effect.ValidPayloadDigest() || effect.WriterEpoch <= 0 || effect.WriterEpoch > identity.WriterEpoch {
+				return ErrOutboxEffectConflict
+			}
+			effects = append(effects, effect)
+		}
+		return githubDeliveryTargetLeaseNow(tx, delivery)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return effects, nil
+}
+
 func lockGithubPreparationDelivery(tx *gorm.DB, identity JobCreationIdentity) (*GithubWebhookDelivery, uint, time.Time, error) {
 	if identity.ProtocolVersion != operation.ProtocolVersion {
 		return nil, 0, time.Time{}, ErrControlPlaneProtocol
