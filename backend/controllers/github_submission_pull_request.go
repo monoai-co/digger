@@ -31,6 +31,20 @@ type githubImpactLimits struct {
 	MaxProjects    int
 }
 
+func (limits githubImpactLimits) check(projects, changedFiles int, labels []*github.Label) error {
+	if limits.ByChangedFiles && projects > changedFiles {
+		return fmt.Errorf("impacted projects (%d) exceed changed files (%d)", projects, changedFiles)
+	}
+	force := false
+	for _, label := range labels {
+		force = force || label.GetName() == "digger:force"
+	}
+	if projects > limits.MaxProjects && !force {
+		return fmt.Errorf("impacted projects (%d) exceed configured maximum (%d); add digger:force to override", projects, limits.MaxProjects)
+	}
+	return nil
+}
+
 func prepareGithubPullRequest(snapshot *githubSubmissionConfig, target models.GithubDeliveryTargetIntent, event *github.PullRequestEvent, limits githubImpactLimits) (*githubPullRequestPreparation, error) {
 	if snapshot == nil || snapshot.Config == nil || event == nil || event.GetPullRequest() == nil || event.GetRepo() == nil || event.GetSender() == nil {
 		return nil, errors.New("pull request preparation requires configuration and an accepted event")
@@ -61,15 +75,8 @@ func prepareGithubPullRequest(snapshot *githubSubmissionConfig, target models.Gi
 		result.Outcome = "no_jobs"
 		return result, nil
 	}
-	if limits.ByChangedFiles && len(projects) > len(snapshot.ChangedFiles) {
-		return nil, fmt.Errorf("impacted projects (%d) exceed changed files (%d)", len(projects), len(snapshot.ChangedFiles))
-	}
-	force := false
-	for _, label := range pr.Labels {
-		force = force || label.GetName() == "digger:force"
-	}
-	if len(projects) > limits.MaxProjects && !force {
-		return nil, fmt.Errorf("impacted projects (%d) exceed configured maximum (%d); add digger:force to override", len(projects), limits.MaxProjects)
+	if err := limits.check(len(projects), len(snapshot.ChangedFiles), pr.Labels); err != nil {
+		return nil, err
 	}
 	command, err := scheduler.GetCommandFromJob(result.Jobs[0])
 	if err != nil || command == nil {
