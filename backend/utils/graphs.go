@@ -444,6 +444,9 @@ func CreateDurableGraphFromIntent(ctx context.Context, identity models.JobCreati
 			return ErrDurableJobGraphClaim
 		}
 		var existingBatchOperation models.ControlOperation
+		if err := models.ValidateDurableGraphTargetTx(tx, identity, &delivery, canonicalIntent); err != nil {
+			return fmt.Errorf("%w: %w", ErrDurableJobGraphConflict, err)
+		}
 		existingOperationErr := tx.First(&existingBatchOperation, "delivery_id = ? AND operation_kind = ?", delivery.DeliveryID, "digger_batch").Error
 		if existingOperationErr == nil {
 			if existingBatchOperation.OperationID != batchOperationID.String() || existingBatchOperation.IdentitySHA256 != graphIntentSHA256 ||

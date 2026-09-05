@@ -178,6 +178,20 @@ func loadGithubDeliveryTargetIntentTx(tx *gorm.DB, identity JobCreationIdentity,
 	return DecodeGithubDeliveryTarget(target.Target)
 }
 
+// ValidateDurableGraphTargetTx binds graph creation to the first selected target.
+// The caller must hold the authoritative writer transaction and delivery lease.
+func ValidateDurableGraphTargetTx(tx *gorm.DB, identity JobCreationIdentity, delivery *GithubWebhookDelivery, graph DurableGraphIntent) error {
+	selected, err := loadGithubDeliveryTargetIntentTx(tx, identity, delivery, graph.OrganisationID)
+	if err != nil {
+		return err
+	}
+	if graph.PullRequestNumber != selected.PullRequestNumber || graph.CommitSHA != selected.HeadSHA || graph.Branch != selected.HeadRef ||
+		graph.RepoOwner != selected.RepoOwner || graph.RepoName != selected.RepoName {
+		return ErrGithubDeliveryTargetConflict
+	}
+	return nil
+}
+
 func githubDeliveryTargetLeaseNow(tx *gorm.DB, delivery *GithubWebhookDelivery) error {
 	now, err := databaseTransactionNow(tx, time.Now().UTC())
 	if err != nil {

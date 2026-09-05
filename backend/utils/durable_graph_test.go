@@ -92,6 +92,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		&models.GithubWebhookDelivery{},
 		&models.ControlOperation{},
 		&models.Organisation{},
+		&models.GithubDeliveryTarget{},
 		&models.GithubAppInstallationLink{},
 		&models.VCSConnection{},
 		&models.DiggerBatch{},
@@ -127,7 +128,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		OrganisationId:       organisation.ID,
 		Status:               models.GithubAppInstallationLinkActive,
 	}).Error)
-	deliveryPayload := []byte(`{"action":"opened"}`)
+	deliveryPayload := []byte(`{"action":"opened","installation":{"id":123},"repository":{"id":12345,"name":"sre","full_name":"monoai-co/sre","owner":{"login":"monoai-co"}},"pull_request":{"number":42,"head":{"sha":"deadbeef","ref":"feature/durable-graph"},"base":{"repo":{"id":12345,"full_name":"monoai-co/sre"}}}}`)
 	_, created, err := database.RecordGithubWebhookDelivery(context.Background(), &models.GithubWebhookDelivery{
 		DeliveryID:         "durable-graph-delivery",
 		PayloadSHA256:      fmt.Sprintf("%x", sha256.Sum256(deliveryPayload)),
@@ -142,6 +143,15 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 	claimedDelivery, err := database.ClaimNextGithubWebhookDelivery(context.Background(), time.Now().UTC(), "durable-graph-lease", time.Minute, durableGraphTestDatabaseIdentity, durableGraphTestWriterEpoch)
 	require.NoError(t, err)
 	require.NotNil(t, claimedDelivery)
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(claimedDelivery)
+	require.NoError(t, err)
+	target, err := preparation.Resolve(nil)
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), models.JobCreationIdentity{
+		DatabaseIdentity: durableGraphTestDatabaseIdentity, WriterEpoch: durableGraphTestWriterEpoch, ProtocolVersion: operation.ProtocolVersion,
+		DeliveryOperationID: claimedDelivery.OperationID, DeliveryLeaseID: claimedDelivery.LeaseID,
+	}, target)
+	require.NoError(t, err)
 	return database, organisation, claimedDelivery
 }
 
@@ -1421,6 +1431,33 @@ func TestConvertJobsToDiggerJobsDurableRejectsRetryDrift(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, _, retryErr := ConvertJobsToDiggerJobsDurable(context.Background(), change(request))
 			require.ErrorIs(t, retryErr, ErrDurableJobGraphConflict)
+		})
+	}
+}
+
+func TestConvertJobsToDiggerJobsDurableRejectsUnselectedTargetBeforeInsert(t *testing.T) {
+	for _, field := range []string{"commit", "branch", "pull request"} {
+		t.Run(field, func(t *testing.T) {
+			database, organisation, delivery := newDurableGraphTestDatabase(t)
+			invalid := durableGraphTestRequest(t, organisation, delivery)
+			switch field {
+			case "commit":
+				invalid.CommitSHA = "unselected-commit"
+			case "branch":
+				invalid.Branch = "unselected-branch"
+			case "pull request":
+				invalid.PullRequestNumber++
+				for name, job := range invalid.Jobs {
+					job.PullRequestNumber = &invalid.PullRequestNumber
+					invalid.Jobs[name] = job
+				}
+			}
+			_, _, err := ConvertJobsToDiggerJobsDurable(context.Background(), invalid)
+			require.ErrorIs(t, err, models.ErrGithubDeliveryTargetConflict)
+			assertDurableGraphCounts(t, database, 0, 0, 0)
+			_, _, err = ConvertJobsToDiggerJobsDurable(context.Background(), durableGraphTestRequest(t, organisation, delivery))
+			require.NoError(t, err)
+			assertDurableGraphCounts(t, database, 1, 3, 2)
 		})
 	}
 }

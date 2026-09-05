@@ -291,15 +291,7 @@ func validateGithubSubmissionEnvelope(tx *gorm.DB, identity JobCreationIdentity,
 			return ErrGithubSubmissionTenant
 		}
 	}
-	selected, err := loadGithubDeliveryTargetIntentTx(tx, identity, delivery, orgID)
-	if err != nil {
-		return err
-	}
-	if graph.PullRequestNumber != selected.PullRequestNumber || graph.CommitSHA != selected.HeadSHA ||
-		graph.Branch != selected.HeadRef || graph.RepoOwner != selected.RepoOwner || graph.RepoName != selected.RepoName {
-		return ErrGithubDeliveryTargetConflict
-	}
-	return nil
+	return ValidateDurableGraphTargetTx(tx, identity, delivery, graph)
 }
 
 func validateStoredGithubSubmission(tx *gorm.DB, identity JobCreationIdentity, stored *GithubSubmission, delivery *GithubWebhookDelivery, orgID uint) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -440,6 +441,7 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 		&models.GithubWebhookDelivery{},
 		&models.ControlOperation{},
 		&models.Organisation{},
+		&models.GithubDeliveryTarget{},
 		&models.GithubAppInstallationLink{},
 		&models.VCSConnection{},
 		&models.DiggerBatch{},
@@ -475,10 +477,11 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 		OrganisationId:       organisation.ID,
 		Status:               models.GithubAppInstallationLinkActive,
 	}).Error)
+	payload := []byte(fmt.Sprintf(`{"action":"opened","installation":{"id":123},"repository":{"id":12345,"name":"sre","full_name":"monoai-co/sre","owner":{"login":"monoai-co"}},"pull_request":{"number":42,"head":{"sha":"%s","ref":"feature/integration"},"base":{"repo":{"id":12345,"full_name":"monoai-co/sre"}}}}`, durableExecutionIntegrationSecondSHA))
 	_, created, err := database.RecordGithubWebhookDelivery(context.Background(), &models.GithubWebhookDelivery{
 		DeliveryID:         "durable-execution-integration-delivery",
-		PayloadSHA256:      "durable-execution-integration-payload",
-		Payload:            []byte(`{"action":"opened"}`),
+		PayloadSHA256:      fmt.Sprintf("%x", sha256.Sum256(payload)),
+		Payload:            payload,
 		EventType:          "pull_request",
 		GithubAppID:        456,
 		InstallationID:     &installationID,
@@ -494,6 +497,15 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 
 func createDurableExecutionIntegrationGraph(t *testing.T, database *models.Database, organisation *models.Organisation, delivery *models.GithubWebhookDelivery) (*models.DiggerJob, *models.OutboxEffect) {
 	t.Helper()
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(delivery)
+	require.NoError(t, err)
+	target, err := preparation.Resolve(nil)
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), models.JobCreationIdentity{
+		DatabaseIdentity: durableExecutionIntegrationDatabaseIdentity, WriterEpoch: durableExecutionIntegrationWriterEpoch, ProtocolVersion: operation.ProtocolVersion,
+		DeliveryOperationID: delivery.OperationID, DeliveryLeaseID: delivery.LeaseID,
+	}, target)
+	require.NoError(t, err)
 	project := configuration.Project{Name: "root", WorkflowFile: "digger_workflow.yml"}
 	projects, err := configuration.CreateProjectDependencyGraph([]configuration.Project{project})
 	require.NoError(t, err)
