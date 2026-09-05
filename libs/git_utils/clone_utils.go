@@ -76,10 +76,11 @@ type GitAuth struct {
 }
 
 type GitShell struct {
-	workDir     string
-	timeout     time.Duration
-	environment []string
-	auth        *GitAuth
+	workDir       string
+	parentContext context.Context
+	timeout       time.Duration
+	environment   []string
+	auth          *GitAuth
 }
 
 func NewGitShell(workDir string, auth *GitAuth) *GitShell {
@@ -92,10 +93,11 @@ func NewGitShell(workDir string, auth *GitAuth) *GitShell {
 	}
 
 	return &GitShell{
-		workDir:     workDir,
-		timeout:     30 * time.Second,
-		environment: env,
-		auth:        auth,
+		workDir:       workDir,
+		parentContext: context.Background(),
+		timeout:       30 * time.Second,
+		environment:   env,
+		auth:          auth,
 	}
 }
 
@@ -137,10 +139,17 @@ func (g *GitShell) formatAuthURL(repoURL string) (string, error) {
 }
 
 func (g *GitShell) runCommand(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	output, err := g.runCommandRaw(args...)
+	return strings.TrimSpace(output), err
+}
+
+func (g *GitShell) runCommandRaw(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(g.parentContext, g.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = 2 * time.Second
+	configureGitCommandCancellation(cmd)
 	cmd.Dir = g.workDir
 	cmd.Env = g.environment
 
@@ -163,7 +172,7 @@ func (g *GitShell) runCommand(args ...string) (string, error) {
 		}
 		return "", err
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return stdout.String(), nil
 }
 
 func (g *GitShell) Checkout(branchOrCommit string) error {

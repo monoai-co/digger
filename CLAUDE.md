@@ -1,5 +1,8 @@
 # Repository tooling
 
+- Cancelling a Git parent alone can leave `git-remote-http` holding its pipes
+  open. Unix Git commands use a separate process group and cancel that group;
+  keep the HTTP-fetch cancellation regression enabled when changing Git helpers.
 - A depth-one branch clone cannot check out an older saved commit. Pinned
   configuration reads fetch the exact commit directly, without depending on the
   branch still existing; `libs/git_utils` has a local-repository regression test.
