@@ -58,20 +58,25 @@ func (effect *OutboxEffect) ValidPayloadDigest() bool {
 }
 
 func normalizeOutboxEffectPayload(effectKind string, payload []byte) ([]byte, error) {
-	if effectKind != GithubWorkflowDispatchEffectKind {
+	var typedPayload any
+	switch effectKind {
+	case GithubWorkflowDispatchEffectKind:
+		typedPayload = &GithubWorkflowDispatchPayload{}
+	case GithubWorkflowReconcileEffectKind:
+		typedPayload = &GithubRunReconciliationPayload{}
+	default:
 		return payload, nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	var workflowPayload GithubWorkflowDispatchPayload
-	if err := decoder.Decode(&workflowPayload); err != nil {
+	if err := decoder.Decode(typedPayload); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrOutboxEffectPayload, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, ErrOutboxEffectPayload
 	}
-	canonical, err := json.Marshal(workflowPayload)
+	canonical, err := json.Marshal(typedPayload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrOutboxEffectPayload, err)
 	}
@@ -224,7 +229,12 @@ func (db *Database) CompleteOutboxEffect(ctx context.Context, effectID uuid.UUID
 			"status":           OutboxEffectSucceeded,
 			"updated_at":       effectiveNow,
 		})
-	}, completeDurableWorkflowDispatchTx, now)
+	}, func(tx *gorm.DB, effect *OutboxEffect, effectiveNow time.Time) error {
+		if err := completeDurableWorkflowDispatchTx(tx, effect, effectiveNow); err != nil {
+			return err
+		}
+		return enqueueDurableRunReconciliationTx(tx, effect, providerReceipt, effectiveNow)
+	}, now)
 }
 
 func (db *Database) RetryOutboxEffect(ctx context.Context, effectID uuid.UUID, leaseID string, lastError string, retryDelay time.Duration, now time.Time, databaseIdentity string, writerEpoch int64) error {

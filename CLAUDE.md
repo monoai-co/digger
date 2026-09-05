@@ -18,6 +18,9 @@
   or `ee/cli`.
 - This repository does not provide `scripts/check.sh`; run the affected module
   suites locally and use the existing CI jobs for repository-wide validation.
+- For GORM relations whose foreign and referenced field names coincide, declare
+  `belongsTo` explicitly. Otherwise AutoMigrate can infer the reverse foreign key;
+  verify both PostgreSQL migration output and the SQLite test schema.
 - The full `libs` and `cli` suites include integration tests that require
   GitHub App credentials, Terraform, a licence service, Azurite, Google ADC,
   and AWS credentials. Run focused affected packages locally and use the

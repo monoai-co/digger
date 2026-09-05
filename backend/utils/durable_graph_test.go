@@ -103,6 +103,7 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		&models.OutboxEffect{},
 		&models.ExecutionClaimAttempt{},
 		&models.JobStatusCallback{},
+		&models.ApplyRecovery{},
 	))
 	require.NoError(t, gormDB.Create(&models.ControlPlaneFence{
 		ID:               models.ControlPlaneFenceSingletonID,

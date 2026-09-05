@@ -33,6 +33,13 @@ func NewGithubWorkflowOutboxDispatch(
 		return nil, ErrGithubWorkflowOutboxDispatch
 	}
 	return func(ctx context.Context, request OutboxDispatchRequest) (OutboxDispatchResult, error) {
+		if request.EffectKind == models.GithubWorkflowReconcileEffectKind {
+			reconciler, ok := store.(durableRunReconciliationStore)
+			if !ok {
+				return OutboxDispatchResult{}, ErrOutboxDispatcherMisconfigured
+			}
+			return reconcileGithubWorkflowRun(ctx, request, reconciler, githubClientProvider)
+		}
 		if request.EffectKind != models.GithubWorkflowDispatchEffectKind {
 			return OutboxDispatchResult{}, fmt.Errorf("unsupported outbox effect kind %q", request.EffectKind)
 		}

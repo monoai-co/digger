@@ -231,6 +231,32 @@ func TestOutboxDispatcherDeadLettersProviderPoisonAtMaxAttempts(t *testing.T) {
 	shutdownOutboxDispatcher(t, dispatcher)
 }
 
+func TestOutboxDispatcherReconciliationPollsPastMaxAttempts(t *testing.T) {
+	database := newGithubWebhookProcessorTestDatabase(t)
+	operationEffect := enqueueOutboxDispatcherTestEffect(t, database, "operation-reconcile-poll")
+	require.NoError(t, database.GormDB.Delete(operationEffect).Error)
+	payload, err := json.Marshal(models.GithubRunReconciliationPayload{OperationID: operationEffect.ControlOperationID, DispatchEffectID: uuid.New()})
+	require.NoError(t, err)
+	effect := models.NewOutboxEffect(operationEffect.ControlOperationID, models.GithubWorkflowReconcileEffectKind, "run:1:2", payload, githubWebhookTestWriterEpoch, time.Now().UTC())
+	_, _, err = database.EnqueueOutboxEffect(context.Background(), effect, githubWebhookTestDatabaseIdentity, githubWebhookTestWriterEpoch)
+	require.NoError(t, err)
+	config := testOutboxDispatcherConfig()
+	config.MaxAttempts = 2
+	var attempts atomic.Int32
+	dispatcher := newTestOutboxDispatcher(t, database, func(context.Context, OutboxDispatchRequest) (OutboxDispatchResult, error) {
+		if attempts.Add(1) <= 5 {
+			return OutboxDispatchResult{RetryAfter: time.Millisecond}, nil
+		}
+		return OutboxDispatchResult{ProviderReceipt: json.RawMessage(`{"terminal_noop":true}`)}, nil
+	}, config)
+	dispatcher.Start()
+	t.Cleanup(func() { shutdownOutboxDispatcher(t, dispatcher) })
+	stored := waitForOutboxEffectStatus(t, database, effect.ID, models.OutboxEffectSucceeded)
+	require.Equal(t, int64(6), stored.AttemptCount)
+	require.Equal(t, int32(6), attempts.Load())
+	require.Empty(t, stored.LastError)
+}
+
 func TestOutboxDispatcherDoesNotRedispatchPermanentIdentityMismatch(t *testing.T) {
 	database := newGithubWebhookProcessorTestDatabase(t)
 	effect := enqueueOutboxDispatcherTestEffect(t, database, "operation-identity-mismatch")

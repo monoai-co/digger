@@ -43,6 +43,9 @@ type OutboxDispatchRequest struct {
 
 type OutboxDispatchResult struct {
 	ProviderReceipt json.RawMessage
+	// Successful read-only reconciliation can defer its next poll without
+	// treating a still-running provider job as a failure.
+	RetryAfter time.Duration
 }
 
 // OutboxDispatchFunc must forward IdempotencyKey to a provider that supports
@@ -342,6 +345,16 @@ func (d *OutboxDispatcher) renewLease(effectID uuid.UUID, leaseID string) (err e
 
 func (d *OutboxDispatcher) finishClaim(effect *models.OutboxEffect, leaseID string, outcome outboxDispatchOutcome) {
 	now := time.Now().UTC()
+	if outcome.err == nil && outcome.result.RetryAfter > 0 {
+		if effect.EffectKind != models.GithubWorkflowReconcileEffectKind || len(outcome.result.ProviderReceipt) != 0 {
+			outcome.err = ErrOutboxDispatchPermanent
+		} else {
+			if err := d.store.RetryOutboxEffect(context.Background(), effect.ID, leaseID, "", outcome.result.RetryAfter, now, d.config.DatabaseIdentity, d.config.WriterEpoch); err != nil {
+				slog.Error("Failed to defer workflow reconciliation", "effectID", effect.ID, "error", err)
+			}
+			return
+		}
+	}
 	if outcome.err == nil && len(outcome.result.ProviderReceipt) > 0 && !json.Valid(outcome.result.ProviderReceipt) {
 		outcome.err = errors.New("outbox provider receipt is not valid JSON")
 	}

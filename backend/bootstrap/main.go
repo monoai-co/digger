@@ -261,6 +261,8 @@ func Bootstrap(templates embed.FS, diggerController controllers.DiggerController
 
 	admin.POST("/tokens/issue-access-token", controllers.IssueAccessTokenForOrg)
 	admin.POST("/admin/github-webhooks/:deliveryID/requeue", diggerController.RequeueGithubWebhookDelivery)
+	admin.GET("/admin/apply-recoveries/:operationID", diggerController.GetApplyRecovery)
+	admin.PUT("/admin/apply-recoveries/:operationID/resolutions/:resolutionID", diggerController.ResolveApplyRecovery)
 
 	r.Use(middleware.CORSMiddleware())
 

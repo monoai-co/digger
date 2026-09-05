@@ -86,7 +86,7 @@ func (d DiggerController) ClaimJobExecution(c *gin.Context) {
 	}, jobTokenValue, d.ExecutionGrantSecrets, d.ExecutionGrantSigningKeyID, d.ControlPlaneDatabaseIdentity, d.ControlPlaneWriterEpoch)
 	if err != nil {
 		switch {
-		case errors.Is(err, models.ErrControlPlaneHold), errors.Is(err, models.ErrControlPlaneDrain), errors.Is(err, models.ErrControlPlaneFenced):
+		case errors.Is(err, models.ErrControlPlaneHold), errors.Is(err, models.ErrControlPlaneDrain), errors.Is(err, models.ErrControlPlaneFenced), errors.Is(err, models.ErrApplyRecoveryRequired):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "durable execution claims are paused"})
 		case errors.Is(err, models.ErrDurableJobDispatchNotReady):
 			c.JSON(http.StatusTooEarly, gin.H{"error": "workflow dispatch is not committed"})

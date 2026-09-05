@@ -27,6 +27,8 @@ const GithubWorkflowDispatchEffectKind = "github_workflow_dispatch"
 // deadline starts at first dispatch preparation and is never extended by retry.
 const DurableExecutionClaimWindow = 5 * time.Hour
 
+const DurableExecutionGrantWindow = 5 * time.Hour
+
 var ErrDurableJobDispatchClaim = errors.New("durable job dispatch is not owned by this outbox claim")
 var ErrDurableJobDispatchConflict = errors.New("durable job dispatch state does not match its bound operation")
 var ErrDurableJobDispatchNotReady = errors.New("durable job dispatch is not yet committed")
@@ -159,6 +161,10 @@ func CanonicalDependencyOperationIDs(raw []byte) ([]byte, error) {
 // effect row lock in the same transaction. The batch is the graph mutex and is
 // acquired before any operation, job, or token row.
 func loadDurableWorkflowDispatchStateTx(tx *gorm.DB, effect *OutboxEffect) (*durableWorkflowDispatchState, error) {
+	return loadDurableWorkflowStateTx(tx, effect, true)
+}
+
+func loadDurableWorkflowStateTx(tx *gorm.DB, effect *OutboxEffect, requireActiveInstallation bool) (*durableWorkflowDispatchState, error) {
 	if effect == nil || effect.EffectKind != GithubWorkflowDispatchEffectKind || effect.ControlOperationID == "" ||
 		effect.EffectKey != "job:"+effect.ControlOperationID || !effect.ValidPayloadDigest() {
 		return nil, ErrDurableJobDispatchConflict
@@ -262,26 +268,38 @@ func loadDurableWorkflowDispatchStateTx(tx *gorm.DB, effect *OutboxEffect) (*dur
 		return nil, ErrDurableJobDispatchConflict
 	}
 
-	var installationLinks []GithubAppInstallationLink
-	installationLinkQuery := tx.Where("github_installation_id = ? AND status = ?", *delivery.InstallationID, GithubAppInstallationLinkActive)
-	if tx.Dialector.Name() == "postgres" {
-		installationLinkQuery = installationLinkQuery.Clauses(clause.Locking{Strength: "SHARE"})
-	}
-	if err := installationLinkQuery.Find(&installationLinks).Error; err != nil {
-		return nil, fmt.Errorf("load durable dispatch installation tenant link: %w", err)
-	}
-	if len(installationLinks) != 1 {
-		return nil, ErrDurableJobDispatchConflict
+	var organisationID uint
+	if requireActiveInstallation {
+		var installationLinks []GithubAppInstallationLink
+		installationLinkQuery := tx.Where("github_installation_id = ? AND status = ?", *delivery.InstallationID, GithubAppInstallationLinkActive)
+		if tx.Dialector.Name() == "postgres" {
+			installationLinkQuery = installationLinkQuery.Clauses(clause.Locking{Strength: "SHARE"})
+		}
+		if err := installationLinkQuery.Find(&installationLinks).Error; err != nil {
+			return nil, fmt.Errorf("load durable dispatch installation tenant link: %w", err)
+		}
+		if len(installationLinks) != 1 {
+			return nil, ErrDurableJobDispatchConflict
+		}
+		organisationID = installationLinks[0].OrganisationId
+	} else {
+		// The exact persisted job token keeps its tenant binding after an App
+		// uninstall. Recovery must not depend on a currently active installation.
+		var tokenRoute JobToken
+		if err := tx.Select("organisation_id").First(&tokenRoute, "digger_job_database_id = ?", job.ID).Error; err != nil {
+			return nil, err
+		}
+		organisationID = tokenRoute.OrganisationID
 	}
 	var organisation Organisation
 	organisationQuery := tx
 	if tx.Dialector.Name() == "postgres" {
 		organisationQuery = organisationQuery.Clauses(clause.Locking{Strength: "SHARE"})
 	}
-	if err := organisationQuery.First(&organisation, "id = ?", installationLinks[0].OrganisationId).Error; err != nil {
+	if err := organisationQuery.First(&organisation, "id = ?", organisationID).Error; err != nil {
 		return nil, ErrDurableJobDispatchConflict
 	}
-	if batch.VCSConnectionId != nil {
+	if batch.VCSConnectionId != nil && requireActiveInstallation {
 		var connection VCSConnection
 		connectionQuery := tx
 		if tx.Dialector.Name() == "postgres" {
@@ -620,7 +638,10 @@ func (db *Database) ClaimDurableJobExecution(
 		return nil, ErrDurableJobDispatchClaim
 	}
 	var receipt *DurableExecutionClaimReceipt
-	err := db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, true, func(tx *gorm.DB, _ *ControlPlaneFence) error {
+	err := db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, fence *ControlPlaneFence) error {
+		if err := lockExecutionAdmissionTx(tx); err != nil {
+			return err
+		}
 		now, err := databaseTransactionNow(tx, time.Now().UTC())
 		if err != nil {
 			return err
@@ -653,6 +674,10 @@ func (db *Database) ClaimDurableJobExecution(
 		if err != nil {
 			return err
 		}
+		now, err = databaseTransactionNow(tx, time.Now().UTC())
+		if err != nil {
+			return err
+		}
 		if state.Job.DiggerJobID != request.DiggerJobID || state.Job.ProjectName != request.ProjectName ||
 			state.Batch.RepoFullName != request.RepositoryFullName || state.Job.ProtocolVersion != request.ProtocolVersion ||
 			state.Job.WriterEpoch == nil || *state.Job.WriterEpoch != request.DispatchWriterEpoch ||
@@ -671,6 +696,9 @@ func (db *Database) ClaimDurableJobExecution(
 		var existing ExecutionClaimAttempt
 		err = tx.First(&existing, "operation_id = ? AND run_id = ? AND run_attempt = ?", request.OperationID, request.RunID, request.RunAttempt).Error
 		if err == nil {
+			if !existing.GrantExpiresAt.After(now) {
+				return ErrDurableJobDispatchClaim
+			}
 			claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, existing.ExpectedWriterEpoch, existing.SigningKeyID, existing.GrantExpiresAt)
 			if err != nil {
 				return err
@@ -700,7 +728,24 @@ func (db *Database) ClaimDurableJobExecution(
 		if !dispatchReceipt.ClaimExpiresAt.After(now) {
 			return ErrDurableJobDispatchClaim
 		}
-		claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, state.Token.Expiry)
+		switch fence.Mode {
+		case ControlPlaneModeNormal:
+		case ControlPlaneModeHold:
+			return ErrControlPlaneHold
+		case ControlPlaneModeDrain:
+			return ErrControlPlaneDrain
+		default:
+			return ErrControlPlaneFenced
+		}
+		if err := requireKnownExecutionOutcomesTx(tx, state.Token.OrganisationID, request.OperationID, now); err != nil {
+			return err
+		}
+		// Legacy token retention must not become a month-long execution grant.
+		grantExpiresAt := now.Add(DurableExecutionGrantWindow)
+		if state.Token.Expiry.Before(grantExpiresAt) {
+			grantExpiresAt = state.Token.Expiry
+		}
+		claimSHA256, err := durableExecutionClaimSHA256(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, grantExpiresAt)
 		if err != nil {
 			return err
 		}
@@ -712,7 +757,7 @@ func (db *Database) ClaimDurableJobExecution(
 		if err := tx.Model(&ExecutionClaimAttempt{}).Where("operation_id = ? AND state = ?", request.OperationID, ExecutionClaimGranted).Count(&grantedCount).Error; err != nil {
 			return err
 		}
-		claim := executionClaimAttempt(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, state.Token.Expiry, claimSHA256, now)
+		claim := executionClaimAttempt(request, state.Job.ID, state.Token.ID, writerEpoch, activeGrantSigningKeyID, grantExpiresAt, claimSHA256, now)
 		if grantedCount > 0 {
 			claim.State = ExecutionClaimRejected
 			claim.RejectedAt = &now
@@ -738,7 +783,7 @@ func (db *Database) ClaimDurableJobExecution(
 		if result.RowsAffected != 1 {
 			return ErrDurableJobDispatchConflict
 		}
-		receipt = &DurableExecutionClaimReceipt{Granted: true, ExecutionGrant: grant, SigningKeyID: activeGrantSigningKeyID, GrantExpiresAt: state.Token.Expiry}
+		receipt = &DurableExecutionClaimReceipt{Granted: true, ExecutionGrant: grant, SigningKeyID: activeGrantSigningKeyID, GrantExpiresAt: grantExpiresAt}
 		return nil
 	})
 	return receipt, err

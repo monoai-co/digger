@@ -337,6 +337,12 @@ func (d DiggerController) ProcessGithubWebhookDelivery(ctx context.Context, deli
 	gh := d.GithubClientProvider
 	appID := delivery.GithubAppID
 	switch event := event.(type) {
+	case *github.WorkflowRunEvent:
+		err := models.DB.WakeDurableRunReconciliation(ctx, event.GetRepo().GetID(), event.GetWorkflowRun().GetID(), d.ControlPlaneDatabaseIdentity, d.ControlPlaneWriterEpoch)
+		if err == nil && d.OutboxDispatcher != nil {
+			d.OutboxDispatcher.Wake()
+		}
+		return completedGithubWebhookResult("workflow_reconciliation_woken", err)
 	case *github.InstallationEvent:
 		slog.Info("Processing InstallationEvent", "action", event.GetAction(), "installationId", event.GetInstallation().GetID())
 		switch event.GetAction() {

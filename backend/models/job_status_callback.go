@@ -63,8 +63,7 @@ func (db *Database) ApplyDurableJobStatusCallback(
 
 	var receipt *DurableJobStatusCallbackReceipt
 	err = db.WithAuthoritativeWriteTx(ctx, databaseIdentity, writerEpoch, false, func(tx *gorm.DB, fence *ControlPlaneFence) error {
-		now, err := databaseTransactionNow(tx, time.Now().UTC())
-		if err != nil {
+		if err := lockExecutionAdmissionTx(tx); err != nil {
 			return err
 		}
 
@@ -143,6 +142,12 @@ func (db *Database) ApplyDurableJobStatusCallback(
 		}
 		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 			return existingErr
+		}
+		// Row-lock waits may outlast the grant. Check current database time only
+		// after those locks; committed receipt replay above remains timeless.
+		now, err := databaseTransactionNow(tx, time.Now().UTC())
+		if err != nil {
+			return err
 		}
 		if token.ActivatedAt == nil || token.RevokedAt != nil || !token.Expiry.After(now) || !claim.GrantExpiresAt.After(now) {
 			return ErrDurableJobStatusCallbackConflict

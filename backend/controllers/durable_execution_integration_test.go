@@ -142,6 +142,7 @@ func (provider *durableExecutionIntegrationProvider) roundTrip(request *http.Req
 			RunAttempt:   github.Int(1),
 			DisplayTitle: github.String("customer-defined display title"),
 			Event:        github.String("workflow_dispatch"),
+			Status:       github.String("in_progress"),
 			HeadBranch:   github.String("main"),
 			HeadSHA:      github.String(headSHA),
 		}
@@ -439,6 +440,7 @@ func newDurableExecutionIntegrationDatabase(t *testing.T) (*models.Database, *mo
 		&models.OutboxEffect{},
 		&models.ExecutionClaimAttempt{},
 		&models.JobStatusCallback{},
+		&models.ApplyRecovery{},
 	))
 	require.NoError(t, gormDB.Create(&models.ControlPlaneFence{
 		ID:               models.ControlPlaneFenceSingletonID,

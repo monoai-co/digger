@@ -217,6 +217,40 @@ func TestPostgresGithubWorkflowOutboxPayloadCanonicalizesAndDetectsTampering(t *
 	require.False(t, tampered.ValidPayloadDigest())
 }
 
+func TestPostgresGithubWorkflowReconciliationPayloadCanonicalizesAndDetectsTampering(t *testing.T) {
+	database := newPostgresOutboxTestDatabase(t)
+	const operationID = "operation-postgres-reconciliation-payload"
+	createOutboxTestOperation(t, database, operationID)
+	dispatchEffectID := uuid.New()
+	reversedPayload := []byte(fmt.Sprintf(`{ "dispatch_effect_id" : %q, "operation_id" : %q }`, dispatchEffectID, operationID))
+	effect := NewOutboxEffect(operationID, GithubWorkflowReconcileEffectKind, "run:12345:1001", reversedPayload, testControlPlaneWriterEpoch, time.Now().UTC())
+	receipt, created, err := database.EnqueueOutboxEffect(context.Background(), effect, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	var stored OutboxEffect
+	require.NoError(t, database.GormDB.First(&stored, "id = ?", receipt.ID).Error)
+	require.True(t, stored.ValidPayloadDigest(), "PostgreSQL returned payload %q with digest %s", stored.Payload, stored.PayloadSHA256)
+
+	canonicalPayload := []byte(fmt.Sprintf(`{"operation_id":%q,"dispatch_effect_id":%q}`, operationID, dispatchEffectID))
+	duplicate := NewOutboxEffect(operationID, GithubWorkflowReconcileEffectKind, "run:12345:1001", canonicalPayload, testControlPlaneWriterEpoch, time.Now().UTC())
+	duplicateReceipt, created, err := database.EnqueueOutboxEffect(context.Background(), duplicate, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
+	require.NoError(t, err)
+	require.False(t, created)
+	require.Equal(t, receipt.ID, duplicateReceipt.ID)
+	require.True(t, duplicateReceipt.ValidPayloadDigest())
+
+	unknownFieldPayload := []byte(fmt.Sprintf(`{"operation_id":%q,"dispatch_effect_id":%q,"unexpected":true}`, operationID, dispatchEffectID))
+	unknownField := NewOutboxEffect(operationID, GithubWorkflowReconcileEffectKind, "run:12345:1002", unknownFieldPayload, testControlPlaneWriterEpoch, time.Now().UTC())
+	_, created, err = database.EnqueueOutboxEffect(context.Background(), unknownField, testControlPlaneDatabaseIdentity, testControlPlaneWriterEpoch)
+	require.ErrorIs(t, err, ErrOutboxEffectPayload)
+	require.False(t, created)
+
+	require.NoError(t, database.GormDB.Model(&OutboxEffect{}).Where("id = ?", receipt.ID).Update("payload", []byte(fmt.Sprintf(`{"operation_id":%q,"dispatch_effect_id":%q}`, "tampered-operation", dispatchEffectID))).Error)
+	require.NoError(t, database.GormDB.First(&stored, "id = ?", receipt.ID).Error)
+	require.False(t, stored.ValidPayloadDigest())
+}
+
 func TestPostgresDatabaseTransactionNowAdvancesWithinTransaction(t *testing.T) {
 	database := newPostgresOutboxTestDatabase(t)
 	tx := database.GormDB.Begin()
