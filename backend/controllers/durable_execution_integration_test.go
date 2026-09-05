@@ -51,6 +51,7 @@ type durableExecutionIntegrationCompletionStore struct {
 	*models.Database
 	completionCalls     atomic.Int32
 	firstCompletionLost chan struct{}
+	releaseFirst        chan struct{}
 	secondCompletionHit chan struct{}
 	releaseSecond       chan struct{}
 }
@@ -67,6 +68,11 @@ func (store *durableExecutionIntegrationCompletionStore) CompleteOutboxEffect(
 	switch store.completionCalls.Add(1) {
 	case 1:
 		close(store.firstCompletionLost)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-store.releaseFirst:
+		}
 		return errors.New("simulated loss of the first provider receipt commit")
 	case 2:
 		close(store.secondCompletionHit)
@@ -236,6 +242,7 @@ func TestPostgresDurableExecutionRejectsLostDispatchAndReplaysCanonicalClaim(t *
 	store := &durableExecutionIntegrationCompletionStore{
 		Database:            database,
 		firstCompletionLost: make(chan struct{}),
+		releaseFirst:        make(chan struct{}),
 		secondCompletionHit: make(chan struct{}),
 		releaseSecond:       make(chan struct{}),
 	}
@@ -252,7 +259,10 @@ func TestPostgresDurableExecutionRejectsLostDispatchAndReplaysCanonicalClaim(t *
 	})
 	require.NoError(t, err)
 	dispatcher.Start()
+	var releaseFirstOnce, releaseSecondOnce sync.Once
 	t.Cleanup(func() {
+		releaseFirstOnce.Do(func() { close(store.releaseFirst) })
+		releaseSecondOnce.Do(func() { close(store.releaseSecond) })
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		require.NoError(t, dispatcher.Shutdown(ctx))
@@ -264,6 +274,7 @@ func TestPostgresDurableExecutionRejectsLostDispatchAndReplaysCanonicalClaim(t *
 	require.NotNil(t, token.ActivatedAt)
 	require.Nil(t, token.RevokedAt)
 	assertDurableExecutionIntegrationEffect(t, database, effect.ID, models.OutboxEffectProcessing, 1, 0)
+	releaseFirstOnce.Do(func() { close(store.releaseFirst) })
 
 	verifier, signingKey := githubOIDCTestVerifier(t)
 	controller := DiggerController{
@@ -301,7 +312,7 @@ func TestPostgresDurableExecutionRejectsLostDispatchAndReplaysCanonicalClaim(t *
 	require.NoError(t, database.GormDB.Model(&models.ExecutionClaimAttempt{}).Count(&attemptsBeforeCommit).Error)
 	require.Zero(t, attemptsBeforeCommit)
 
-	close(store.releaseSecond)
+	releaseSecondOnce.Do(func() { close(store.releaseSecond) })
 	require.Eventually(t, func() bool {
 		var current models.OutboxEffect
 		return database.GormDB.First(&current, "id = ?", effect.ID).Error == nil && current.Status == models.OutboxEffectSucceeded
