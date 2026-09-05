@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -38,13 +37,7 @@ func dispatchGithubReportCreate(ctx context.Context, request OutboxDispatchReque
 	if client == nil {
 		return OutboxDispatchResult{}, ErrOutboxDispatcherMisconfigured
 	}
-	// Redirects may replay a POST. Keep the installation transport, but require
-	// the permit owner to observe every response without following redirects.
-	httpClient := *client.Client()
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	reportClient := github.NewClient(&httpClient)
-	reportClient.BaseURL, reportClient.UploadURL, reportClient.UserAgent = client.BaseURL, client.UploadURL, client.UserAgent
-	client = reportClient
+	client = githubClientWithoutRedirects(client)
 	preparation, err := store.PrepareGithubReportCreate(ctx, request.EffectID, request.LeaseID, request.DatabaseIdentity, request.WriterEpoch)
 	if err != nil {
 		return OutboxDispatchResult{}, err
