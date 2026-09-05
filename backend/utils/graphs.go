@@ -1,10 +1,14 @@
 package utils
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sort"
 	"strings"
@@ -255,44 +259,65 @@ func ConvertJobsToDiggerJobs(jobType scheduler.DiggerCommand, jobReporterType st
 // provider links, and dependency links in the same fenced transaction. A retry
 // returns the previously committed graph after validating its immutable shape.
 func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraphRequest) (*uuid.UUID, map[string]*models.DiggerJob, error) {
+	intent, err := PrepareDurableGraphIntent(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	return CreateDurableGraphFromIntent(ctx, request.Identity, *intent)
+}
+
+// PrepareDurableGraphIntent freezes the selected execution inputs without
+// accessing the database, generating credentials, or creating runtime providers.
+func PrepareDurableGraphIntent(request DurableJobGraphRequest) (*models.DurableGraphIntent, error) {
 	if strings.TrimSpace(request.Identity.DatabaseIdentity) == "" || request.Identity.WriterEpoch <= 0 {
-		return nil, nil, models.ErrControlPlaneUnconfigured
+		return nil, models.ErrControlPlaneUnconfigured
 	}
 	if strings.TrimSpace(request.Identity.DeliveryLeaseID) == "" {
-		return nil, nil, ErrDurableJobGraphClaim
+		return nil, ErrDurableJobGraphClaim
 	}
 	if request.Identity.ProtocolVersion != operation.ProtocolVersion {
-		return nil, nil, fmt.Errorf("durable job graph protocol version %d does not match binary version %d", request.Identity.ProtocolVersion, operation.ProtocolVersion)
+		return nil, fmt.Errorf("durable job graph protocol version %d does not match binary version %d", request.Identity.ProtocolVersion, operation.ProtocolVersion)
 	}
 	deliveryOperationID := operation.ID(request.Identity.DeliveryOperationID)
 	if !deliveryOperationID.Valid() {
-		return nil, nil, fmt.Errorf("invalid delivery operation identity")
+		return nil, fmt.Errorf("invalid delivery operation identity")
 	}
 	if len(request.Jobs) == 0 {
-		return nil, nil, fmt.Errorf("durable job graph must contain at least one job")
+		return nil, fmt.Errorf("durable job graph must contain at least one job")
+	}
+	if !knownDurableJobType(request.JobType) {
+		return nil, fmt.Errorf("unknown durable job type %q", request.JobType)
+	}
+	for project := range request.JobCheckRunDataByProject {
+		if _, exists := request.Jobs[project]; !exists {
+			return nil, fmt.Errorf("check-run metadata references unselected project %q", project)
+		}
+	}
+	if request.ProjectsGraph == nil {
+		return nil, fmt.Errorf("durable project graph is required")
 	}
 
 	impactedGraph, err := durableImpactedProjectsOnlyGraph(request.ProjectsGraph, request.Projects)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create impacted projects graph: %w", err)
+		return nil, fmt.Errorf("create impacted projects graph: %w", err)
 	}
 	projectOrder, err := graph.StableTopologicalSort(impactedGraph, func(first string, second string) bool {
 		return first < second
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("sort impacted projects graph: %w", err)
+		return nil, fmt.Errorf("sort impacted projects graph: %w", err)
 	}
 	predecessorMap, err := impactedGraph.PredecessorMap()
 	if err != nil {
-		return nil, nil, fmt.Errorf("get impacted project predecessors: %w", err)
+		return nil, fmt.Errorf("get impacted project predecessors: %w", err)
 	}
 	if len(projectOrder) != len(request.Jobs) || len(request.Projects) != len(request.Jobs) {
-		return nil, nil, fmt.Errorf("durable job, project, and graph sets must match")
+		return nil, fmt.Errorf("durable job, project, and graph sets must match")
 	}
 
 	batchOperationID, err := operation.DeriveBatch(deliveryOperationID, string(request.JobType), request.RepoFullName, request.PullRequestNumber, request.CommitSHA)
 	if err != nil {
-		return nil, nil, fmt.Errorf("derive batch operation identity: %w", err)
+		return nil, fmt.Errorf("derive batch operation identity: %w", err)
 	}
 	jobOperationIDs := make(map[string]operation.ID, len(projectOrder))
 	for _, projectName := range projectOrder {
@@ -300,13 +325,55 @@ func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraph
 		project, projectExists := request.Projects[projectName]
 		if !jobExists || !projectExists || job.ProjectName != projectName || project.Name != projectName ||
 			job.PullRequestNumber == nil || *job.PullRequestNumber != request.PullRequestNumber {
-			return nil, nil, fmt.Errorf("durable job and project identity mismatch for %q", projectName)
+			return nil, fmt.Errorf("durable job and project identity mismatch for %q", projectName)
 		}
 		jobOperationID, deriveErr := operation.DeriveJob(batchOperationID, projectName, project.WorkflowFile)
 		if deriveErr != nil {
-			return nil, nil, fmt.Errorf("derive job operation identity for %q: %w", projectName, deriveErr)
+			return nil, fmt.Errorf("derive job operation identity for %q: %w", projectName, deriveErr)
 		}
 		jobOperationIDs[projectName] = jobOperationID
+	}
+	preparedJobs, err := prepareDurableJobs(request, projectOrder, jobOperationIDs, predecessorMap)
+	if err != nil {
+		return nil, err
+	}
+	intent := durableGraphIntent(request, preparedJobs, predecessorMap)
+	return cloneDurableGraphIntent(intent)
+}
+
+// CreateDurableGraphFromIntent consumes the frozen execution contract directly.
+// A retry reads existing credentials; only a fresh graph creates new tokens.
+func CreateDurableGraphFromIntent(ctx context.Context, identity models.JobCreationIdentity, frozen models.DurableGraphIntent) (*uuid.UUID, map[string]*models.DiggerJob, error) {
+	if strings.TrimSpace(identity.DatabaseIdentity) == "" || identity.WriterEpoch <= 0 {
+		return nil, nil, models.ErrControlPlaneUnconfigured
+	}
+	if strings.TrimSpace(identity.DeliveryLeaseID) == "" {
+		return nil, nil, ErrDurableJobGraphClaim
+	}
+	if identity.ProtocolVersion != operation.ProtocolVersion || frozen.ProtocolVersion != identity.ProtocolVersion {
+		return nil, nil, models.ErrControlPlaneProtocol
+	}
+	deliveryOperationID := operation.ID(identity.DeliveryOperationID)
+	if !deliveryOperationID.Valid() {
+		return nil, nil, fmt.Errorf("invalid delivery operation identity")
+	}
+	intent, err := cloneDurableGraphIntent(frozen)
+	if err != nil {
+		return nil, nil, err
+	}
+	batchOperationID, err := operation.DeriveBatch(deliveryOperationID, string(intent.JobType), intent.RepoFullName, intent.PullRequestNumber, intent.CommitSHA)
+	if err != nil {
+		return nil, nil, err
+	}
+	preparedJobs, projectOrder, predecessorMap, err := prepareFrozenDurableJobs(*intent, batchOperationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	request := durableGraphRequestFromIntent(identity, *intent)
+	canonicalIntent := durableGraphIntent(request, preparedJobs, predecessorMap)
+	graphIntentSHA256, err := canonicalIntent.SHA256()
+	if err != nil {
+		return nil, nil, err
 	}
 
 	var batchID uuid.UUID
@@ -380,15 +447,6 @@ func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraph
 		if delivery.LeaseExpiresAt == nil || !delivery.LeaseExpiresAt.After(now) {
 			return ErrDurableJobGraphClaim
 		}
-		preparedJobs, prepareErr := prepareDurableJobs(request, projectOrder, jobOperationIDs, predecessorMap, organisation.Name)
-		if prepareErr != nil {
-			return prepareErr
-		}
-		graphIntentSHA256, intentErr := durableGraphIntentSHA256(request, preparedJobs, predecessorMap)
-		if intentErr != nil {
-			return intentErr
-		}
-
 		var existingBatchOperation models.ControlOperation
 		existingOperationErr := tx.First(&existingBatchOperation, "delivery_id = ? AND operation_kind = ?", delivery.DeliveryID, "digger_batch").Error
 		if existingOperationErr == nil {
@@ -411,6 +469,20 @@ func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraph
 		}
 		if !errors.Is(existingOperationErr, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("find durable batch operation: %w", existingOperationErr)
+		}
+		for index := range preparedJobs {
+			var spec scheduler.JobJson
+			if err := json.Unmarshal(preparedJobs[index].intentSpec, &spec); err != nil {
+				return err
+			}
+			preparedJobs[index].tokenValue = "cli:" + uuid.NewString()
+			spec.BackendJobToken = preparedJobs[index].tokenValue
+			spec.BackendHostname = GetPublicBaseURL()
+			spec.BackendOrganisationName = organisation.Name
+			preparedJobs[index].serializedSpec, err = json.Marshal(spec)
+			if err != nil {
+				return err
+			}
 		}
 
 		deliveryID := delivery.DeliveryID
@@ -574,24 +646,12 @@ func ConvertJobsToDiggerJobsDurable(ctx context.Context, request DurableJobGraph
 	return &batchID, result, nil
 }
 
-func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, jobOperationIDs map[string]operation.ID, predecessorMap map[string]map[string]graph.Edge[string], organisationName string) ([]durablePreparedJob, error) {
+func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, jobOperationIDs map[string]operation.ID, predecessorMap map[string]map[string]graph.Edge[string]) ([]durablePreparedJob, error) {
 	preparedJobs := make([]durablePreparedJob, 0, len(projectOrder))
-	backendHostName := GetPublicBaseURL()
 	for _, projectName := range projectOrder {
 		job := request.Jobs[projectName]
 		project := request.Projects[projectName]
-		tokenValue := "cli:" + uuid.NewString()
-		serializedSpec, err := json.Marshal(scheduler.JobToJson(job, request.JobType, organisationName, request.Branch, request.CommitSHA, tokenValue, backendHostName, project))
-		if err != nil {
-			return nil, fmt.Errorf("marshal durable job %q: %w", projectName, err)
-		}
-		var intentSpec scheduler.JobJson
-		if err := json.Unmarshal(serializedSpec, &intentSpec); err != nil {
-			return nil, fmt.Errorf("normalize durable job %q: %w", projectName, err)
-		}
-		intentSpec.BackendJobToken = ""
-		intentSpec.BackendHostname = ""
-		intentSpec.BackendOrganisationName = ""
+		intentSpec := scheduler.JobToJson(job, request.JobType, "", request.Branch, request.CommitSHA, "", "", project)
 		serializedIntentSpec, err := json.Marshal(intentSpec)
 		if err != nil {
 			return nil, fmt.Errorf("marshal durable job intent %q: %w", projectName, err)
@@ -612,10 +672,9 @@ func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, j
 		prepared := durablePreparedJob{
 			projectName:            projectName,
 			operationID:            jobOperationIDs[projectName],
-			serializedSpec:         serializedSpec,
+			serializedSpec:         serializedIntentSpec,
 			intentSpec:             serializedIntentSpec,
 			dependencyOperationIDs: serializedParentOperationIDs,
-			tokenValue:             tokenValue,
 			workflowFile:           project.WorkflowFile,
 		}
 		if checkRunData, ok := request.JobCheckRunDataByProject[projectName]; ok {
@@ -627,7 +686,7 @@ func prepareDurableJobs(request DurableJobGraphRequest, projectOrder []string, j
 	return preparedJobs, nil
 }
 
-func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (string, error) {
+func durableGraphIntent(request DurableJobGraphRequest, preparedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) models.DurableGraphIntent {
 	var batchCheckRunData *models.DurableGraphCheckRunData
 	if request.BatchCheckRunData != nil {
 		batchCheckRunData = &models.DurableGraphCheckRunData{Id: request.BatchCheckRunData.Id, Url: request.BatchCheckRunData.Url}
@@ -664,7 +723,122 @@ func durableGraphIntentSHA256(request DurableJobGraphRequest, preparedJobs []dur
 			Parents:        durableParentNames(predecessorMap[preparedJob.projectName]),
 		})
 	}
-	return intent.SHA256()
+	return intent
+}
+
+func cloneDurableGraphIntent(intent models.DurableGraphIntent) (*models.DurableGraphIntent, error) {
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		return nil, err
+	}
+	var frozen models.DurableGraphIntent
+	if err := json.Unmarshal(encoded, &frozen); err != nil {
+		return nil, err
+	}
+	return &frozen, nil
+}
+
+func durableGraphRequestFromIntent(identity models.JobCreationIdentity, intent models.DurableGraphIntent) DurableJobGraphRequest {
+	request := DurableJobGraphRequest{
+		Identity: identity, JobType: intent.JobType, JobReporterType: intent.JobReporterType,
+		OrganisationID: intent.OrganisationID, GithubInstallationID: intent.GithubInstallationID,
+		Branch: intent.Branch, PullRequestNumber: intent.PullRequestNumber, RepoOwner: intent.RepoOwner,
+		RepoName: intent.RepoName, RepoFullName: intent.RepoFullName, CommitSHA: intent.CommitSHA,
+		CommentID: intent.CommentID, DiggerConfig: intent.DiggerConfig, AISummaryCommentID: intent.AISummaryCommentID,
+		ReportTerraformOutput: intent.ReportTerraformOutput, CoverAllImpactedProjects: intent.CoverAllImpactedProjects,
+		VCSConnectionID: intent.VCSConnectionID,
+	}
+	if intent.BatchCheckRunData != nil {
+		request.BatchCheckRunData = &CheckRunData{Id: intent.BatchCheckRunData.Id, Url: intent.BatchCheckRunData.Url}
+	}
+	return request
+}
+
+func prepareFrozenDurableJobs(intent models.DurableGraphIntent, batchOperationID operation.ID) ([]durablePreparedJob, []string, map[string]map[string]graph.Edge[string], error) {
+	if len(intent.Jobs) == 0 || strings.TrimSpace(intent.JobReporterType) == "" || !knownDurableJobType(intent.JobType) {
+		return nil, nil, nil, fmt.Errorf("frozen graph requires jobs and a reporter")
+	}
+	dependencyGraph := graph.New(graph.StringHash, graph.Directed())
+	byProject := make(map[string]durablePreparedJob, len(intent.Jobs))
+	for _, job := range intent.Jobs {
+		if _, exists := byProject[job.ProjectName]; exists {
+			return nil, nil, nil, fmt.Errorf("duplicate frozen project %q", job.ProjectName)
+		}
+		expectedID, err := operation.DeriveJob(batchOperationID, job.ProjectName, job.WorkflowFile)
+		if err != nil || job.OperationID != expectedID.String() {
+			return nil, nil, nil, fmt.Errorf("frozen job identity mismatch for %q", job.ProjectName)
+		}
+		var spec scheduler.JobJson
+		decoder := json.NewDecoder(bytes.NewReader(job.SerializedSpec))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&spec); err != nil {
+			return nil, nil, nil, fmt.Errorf("decode frozen job %q: %w", job.ProjectName, err)
+		}
+		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+			return nil, nil, nil, fmt.Errorf("frozen job %q contains trailing JSON", job.ProjectName)
+		}
+		if spec.ProjectName != job.ProjectName || spec.JobType != string(intent.JobType) ||
+			spec.PullRequestNumber == nil || *spec.PullRequestNumber != intent.PullRequestNumber ||
+			spec.Commit != intent.CommitSHA || spec.Branch != intent.Branch ||
+			spec.BackendJobToken != "" || spec.BackendHostname != "" || spec.BackendOrganisationName != "" ||
+			(job.CheckRunID == nil) != (job.CheckRunURL == nil) {
+			return nil, nil, nil, fmt.Errorf("frozen job specification mismatch for %q", job.ProjectName)
+		}
+		canonical, err := json.Marshal(spec)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if err := dependencyGraph.AddVertex(job.ProjectName); err != nil {
+			return nil, nil, nil, err
+		}
+		byProject[job.ProjectName] = durablePreparedJob{projectName: job.ProjectName, operationID: expectedID,
+			serializedSpec: canonical, intentSpec: canonical, workflowFile: job.WorkflowFile,
+			checkRunID: job.CheckRunID, checkRunURL: job.CheckRunURL}
+	}
+	for _, job := range intent.Jobs {
+		parents := make(map[string]bool, len(job.Parents))
+		for _, parent := range job.Parents {
+			if _, exists := byProject[parent]; !exists || parent == job.ProjectName || parents[parent] {
+				return nil, nil, nil, fmt.Errorf("invalid frozen dependency %q -> %q", parent, job.ProjectName)
+			}
+			parents[parent] = true
+			if err := dependencyGraph.AddEdge(parent, job.ProjectName); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+	order, err := graph.StableTopologicalSort(dependencyGraph, func(a, b string) bool { return a < b })
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	predecessors, err := dependencyGraph.PredecessorMap()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prepared := make([]durablePreparedJob, 0, len(order))
+	for _, name := range order {
+		job := byProject[name]
+		parentIDs := make([]string, 0, len(predecessors[name]))
+		for parent := range predecessors[name] {
+			parentIDs = append(parentIDs, byProject[parent].operationID.String())
+		}
+		sort.Strings(parentIDs)
+		job.dependencyOperationIDs, err = json.Marshal(parentIDs)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		prepared = append(prepared, job)
+	}
+	return prepared, order, predecessors, nil
+}
+
+func knownDurableJobType(jobType scheduler.DiggerCommand) bool {
+	switch jobType {
+	case scheduler.DiggerCommandNoop, scheduler.DiggerCommandPlan, scheduler.DiggerCommandApply, scheduler.DiggerCommandLock, scheduler.DiggerCommandUnlock:
+		return true
+	default:
+		return false
+	}
 }
 
 func loadExistingDurableJobGraph(tx *gorm.DB, batch *models.DiggerBatch, batchOperation *models.ControlOperation, batchOperationID operation.ID, request DurableJobGraphRequest, expectedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (map[string]*models.DiggerJob, error) {
@@ -779,15 +953,13 @@ func loadExistingDurableJobGraph(tx *gorm.DB, batch *models.DiggerBatch, batchOp
 			if err != nil {
 				return nil, fmt.Errorf("marshal expected durable workflow dispatch for %q: %w", persistedJob.ProjectName, err)
 			}
-			expectedEffect := models.NewOutboxEffect(
-				*persistedJob.OperationID,
-				models.GithubWorkflowDispatchEffectKind,
-				"job:"+*persistedJob.OperationID,
-				canonicalPayload,
-				persistedJobOperation.WriterEpoch,
-				dispatchEffects[0].CreatedAt,
-			)
-			if !dispatchEffects[0].ValidPayloadDigest() || !dispatchEffects[0].HasSameIdentity(expectedEffect) {
+			expectedDigest := sha256.Sum256(canonicalPayload)
+			effect := &dispatchEffects[0]
+			// WriterEpoch belongs to the current outbox lease, not the original
+			// graph identity. Validate immutable fields without allocating a UUID.
+			if !effect.ValidPayloadDigest() || effect.ControlOperationID != *persistedJob.OperationID ||
+				effect.EffectKind != models.GithubWorkflowDispatchEffectKind || effect.EffectKey != "job:"+*persistedJob.OperationID ||
+				effect.PayloadSHA256 != hex.EncodeToString(expectedDigest[:]) {
 				return nil, ErrDurableJobGraphConflict
 			}
 		}
