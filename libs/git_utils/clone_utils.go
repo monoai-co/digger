@@ -3,6 +3,7 @@ package git_utils
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -29,6 +30,12 @@ func CloneGitRepoAndDoAction(repoUrl string, branch string, commitHash string, t
 		slog.Error("Failed to create temporary directory", "error", err)
 		return err
 	}
+	defer func() {
+		slog.Debug("Removing cloned directory", "directory", dir)
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("Failed to remove directory", "directory", dir, "error", err)
+		}
+	}()
 
 	slog.Debug("Cloning git repository",
 		"repoUrl", repoUrl,
@@ -38,7 +45,11 @@ func CloneGitRepoAndDoAction(repoUrl string, branch string, commitHash string, t
 	)
 
 	git := NewGitShellWithTokenAuth(dir, token, tokenUsername)
-	err = git.Clone(repoUrl, branch)
+	if commitHash != "" {
+		err = git.CloneCommit(repoUrl, commitHash)
+	} else {
+		err = git.Clone(repoUrl, branch)
+	}
 	if err != nil {
 		slog.Error("Failed to clone repository",
 			"repoUrl", repoUrl,
@@ -47,25 +58,6 @@ func CloneGitRepoAndDoAction(repoUrl string, branch string, commitHash string, t
 		)
 		return err
 	}
-
-	if commitHash != "" {
-		err := git.Checkout(commitHash)
-		if err != nil {
-			slog.Error("Failed to checkout commit",
-				"commitHash", commitHash,
-				"error", err,
-			)
-			return err
-		}
-	}
-
-	defer func() {
-		slog.Debug("Removing cloned directory", "directory", dir)
-		ferr := os.RemoveAll(dir)
-		if ferr != nil {
-			slog.Warn("Failed to remove directory", "directory", dir, "error", ferr)
-		}
-	}()
 
 	err = action(dir)
 	if err != nil {
@@ -179,6 +171,43 @@ func (g *GitShell) Checkout(branchOrCommit string) error {
 	args = append(args, branchOrCommit)
 	_, err := g.runCommand(args...)
 	return err
+}
+
+// CloneCommit fetches a full immutable object ID, independent of branch movement
+// or deletion. It never substitutes the current tip when the object is missing.
+func (g *GitShell) CloneCommit(repoURL, commitHash string) error {
+	objectID, err := hex.DecodeString(commitHash)
+	if err != nil || (len(objectID) != 20 && len(objectID) != 32) {
+		return fmt.Errorf("pinned checkout requires a full commit object ID")
+	}
+	format := "sha1"
+	if len(objectID) == 32 {
+		format = "sha256"
+	}
+	if _, err := g.runCommand("init", "--object-format="+format); err != nil {
+		return err
+	}
+	if _, err := g.runCommand("remote", "add", "origin", repoURL); err != nil {
+		return err
+	}
+	authURL, err := g.formatAuthURL(repoURL)
+	if err != nil {
+		return err
+	}
+	if _, err := g.runCommand("fetch", "--depth=1", "--no-tags", "--", authURL, commitHash); err != nil {
+		return err
+	}
+	if _, err := g.runCommand("checkout", "--detach", "FETCH_HEAD"); err != nil {
+		return err
+	}
+	actual, err := g.runCommand("rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return err
+	}
+	if actual != strings.ToLower(commitHash) {
+		return fmt.Errorf("fetched commit does not match the selected object ID")
+	}
+	return nil
 }
 
 // Clone with authentication

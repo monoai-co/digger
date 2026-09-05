@@ -1,5 +1,8 @@
 # Repository tooling
 
+- A depth-one branch clone cannot check out an older saved commit. Pinned
+  configuration reads fetch the exact commit directly, without depending on the
+  branch still existing; `libs/git_utils` has a local-repository regression test.
 - Atlas is not configured as a persistent mise tool. Run the pinned migration
   CLI with `mise x aqua:ariga/atlas@0.37.0 -- atlas ...`.
 - Atlas 0.37 selects an apply endpoint with `atlas migrate apply --to-version
