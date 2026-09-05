@@ -1,14 +1,12 @@
 package utils
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sort"
 	"strings"
@@ -285,9 +283,6 @@ func PrepareDurableGraphIntent(request DurableJobGraphRequest) (*models.DurableG
 	if len(request.Jobs) == 0 {
 		return nil, fmt.Errorf("durable job graph must contain at least one job")
 	}
-	if !knownDurableJobType(request.JobType) {
-		return nil, fmt.Errorf("unknown durable job type %q", request.JobType)
-	}
 	for project := range request.JobCheckRunDataByProject {
 		if _, exists := request.Jobs[project]; !exists {
 			return nil, fmt.Errorf("check-run metadata references unselected project %q", project)
@@ -338,7 +333,8 @@ func PrepareDurableGraphIntent(request DurableJobGraphRequest) (*models.DurableG
 		return nil, err
 	}
 	intent := durableGraphIntent(request, preparedJobs, predecessorMap)
-	return cloneDurableGraphIntent(intent)
+	normalized, _, err := models.NormalizeDurableGraphIntent(request.Identity.DeliveryOperationID, intent)
+	return normalized, err
 }
 
 // CreateDurableGraphFromIntent consumes the frozen execution contract directly.
@@ -365,7 +361,7 @@ func CreateDurableGraphFromIntent(ctx context.Context, identity models.JobCreati
 	if err != nil {
 		return nil, nil, err
 	}
-	preparedJobs, projectOrder, predecessorMap, err := prepareFrozenDurableJobs(*intent, batchOperationID)
+	preparedJobs, projectOrder, predecessorMap, err := prepareFrozenDurableJobs(*intent, deliveryOperationID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -754,66 +750,21 @@ func durableGraphRequestFromIntent(identity models.JobCreationIdentity, intent m
 	return request
 }
 
-func prepareFrozenDurableJobs(intent models.DurableGraphIntent, batchOperationID operation.ID) ([]durablePreparedJob, []string, map[string]map[string]graph.Edge[string], error) {
-	if len(intent.Jobs) == 0 || strings.TrimSpace(intent.JobReporterType) == "" || !knownDurableJobType(intent.JobType) {
-		return nil, nil, nil, fmt.Errorf("frozen graph requires jobs and a reporter")
+func prepareFrozenDurableJobs(intent models.DurableGraphIntent, deliveryOperationID operation.ID) ([]durablePreparedJob, []string, map[string]map[string]graph.Edge[string], error) {
+	normalized, order, err := models.NormalizeDurableGraphIntent(deliveryOperationID.String(), intent)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	dependencyGraph := graph.New(graph.StringHash, graph.Directed())
-	byProject := make(map[string]durablePreparedJob, len(intent.Jobs))
-	for _, job := range intent.Jobs {
-		if _, exists := byProject[job.ProjectName]; exists {
-			return nil, nil, nil, fmt.Errorf("duplicate frozen project %q", job.ProjectName)
-		}
-		expectedID, err := operation.DeriveJob(batchOperationID, job.ProjectName, job.WorkflowFile)
-		if err != nil || job.OperationID != expectedID.String() {
-			return nil, nil, nil, fmt.Errorf("frozen job identity mismatch for %q", job.ProjectName)
-		}
-		var spec scheduler.JobJson
-		decoder := json.NewDecoder(bytes.NewReader(job.SerializedSpec))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&spec); err != nil {
-			return nil, nil, nil, fmt.Errorf("decode frozen job %q: %w", job.ProjectName, err)
-		}
-		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			return nil, nil, nil, fmt.Errorf("frozen job %q contains trailing JSON", job.ProjectName)
-		}
-		if spec.ProjectName != job.ProjectName || spec.JobType != string(intent.JobType) ||
-			spec.PullRequestNumber == nil || *spec.PullRequestNumber != intent.PullRequestNumber ||
-			spec.Commit != intent.CommitSHA || spec.Branch != intent.Branch ||
-			spec.BackendJobToken != "" || spec.BackendHostname != "" || spec.BackendOrganisationName != "" ||
-			(job.CheckRunID == nil) != (job.CheckRunURL == nil) {
-			return nil, nil, nil, fmt.Errorf("frozen job specification mismatch for %q", job.ProjectName)
-		}
-		canonical, err := json.Marshal(spec)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if err := dependencyGraph.AddVertex(job.ProjectName); err != nil {
-			return nil, nil, nil, err
-		}
-		byProject[job.ProjectName] = durablePreparedJob{projectName: job.ProjectName, operationID: expectedID,
-			serializedSpec: canonical, intentSpec: canonical, workflowFile: job.WorkflowFile,
+	byProject := make(map[string]durablePreparedJob, len(normalized.Jobs))
+	predecessors := make(map[string]map[string]graph.Edge[string], len(normalized.Jobs))
+	for _, job := range normalized.Jobs {
+		byProject[job.ProjectName] = durablePreparedJob{projectName: job.ProjectName, operationID: operation.ID(job.OperationID),
+			serializedSpec: job.SerializedSpec, intentSpec: job.SerializedSpec, workflowFile: job.WorkflowFile,
 			checkRunID: job.CheckRunID, checkRunURL: job.CheckRunURL}
-	}
-	for _, job := range intent.Jobs {
-		parents := make(map[string]bool, len(job.Parents))
+		predecessors[job.ProjectName] = make(map[string]graph.Edge[string], len(job.Parents))
 		for _, parent := range job.Parents {
-			if _, exists := byProject[parent]; !exists || parent == job.ProjectName || parents[parent] {
-				return nil, nil, nil, fmt.Errorf("invalid frozen dependency %q -> %q", parent, job.ProjectName)
-			}
-			parents[parent] = true
-			if err := dependencyGraph.AddEdge(parent, job.ProjectName); err != nil {
-				return nil, nil, nil, err
-			}
+			predecessors[job.ProjectName][parent] = graph.Edge[string]{Source: parent, Target: job.ProjectName}
 		}
-	}
-	order, err := graph.StableTopologicalSort(dependencyGraph, func(a, b string) bool { return a < b })
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	predecessors, err := dependencyGraph.PredecessorMap()
-	if err != nil {
-		return nil, nil, nil, err
 	}
 	prepared := make([]durablePreparedJob, 0, len(order))
 	for _, name := range order {
@@ -830,15 +781,6 @@ func prepareFrozenDurableJobs(intent models.DurableGraphIntent, batchOperationID
 		prepared = append(prepared, job)
 	}
 	return prepared, order, predecessors, nil
-}
-
-func knownDurableJobType(jobType scheduler.DiggerCommand) bool {
-	switch jobType {
-	case scheduler.DiggerCommandNoop, scheduler.DiggerCommandPlan, scheduler.DiggerCommandApply, scheduler.DiggerCommandLock, scheduler.DiggerCommandUnlock:
-		return true
-	default:
-		return false
-	}
 }
 
 func loadExistingDurableJobGraph(tx *gorm.DB, batch *models.DiggerBatch, batchOperation *models.ControlOperation, batchOperationID operation.ID, request DurableJobGraphRequest, expectedJobs []durablePreparedJob, predecessorMap map[string]map[string]graph.Edge[string]) (map[string]*models.DiggerJob, error) {

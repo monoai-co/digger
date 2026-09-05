@@ -34,8 +34,6 @@ func TestFrozenGraphBuilderRejectsCyclesAndUnknownSpecFields(t *testing.T) {
 	request := durableGraphTestRequest(t, organisation, delivery)
 	intent, err := PrepareDurableGraphIntent(request)
 	require.NoError(t, err)
-	batchID, err := operation.DeriveBatch(operation.ID(request.Identity.DeliveryOperationID), string(request.JobType), request.RepoFullName, request.PullRequestNumber, request.CommitSHA)
-	require.NoError(t, err)
 	for _, mutate := range []func(*models.DurableGraphIntent){
 		func(frozen *models.DurableGraphIntent) {
 			frozen.Jobs[0].Parents = []string{frozen.Jobs[1].ProjectName}
@@ -65,7 +63,7 @@ func TestFrozenGraphBuilderRejectsCyclesAndUnknownSpecFields(t *testing.T) {
 		frozen, err := cloneDurableGraphIntent(*intent)
 		require.NoError(t, err)
 		mutate(frozen)
-		_, _, _, err = prepareFrozenDurableJobs(*frozen, batchID)
+		_, _, _, err = prepareFrozenDurableJobs(*frozen, operation.ID(request.Identity.DeliveryOperationID))
 		require.Error(t, err)
 	}
 }

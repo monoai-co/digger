@@ -8,10 +8,10 @@ import (
 )
 
 func TestPostgresDurableControlPlaneSchemaRequiresTablesAndColumns(t *testing.T) {
-	for _, missing := range []string{"outbox_effects", "job_status_callbacks", "apply_recoveries", "apply_recovery_revision", "ordering_domains", "delivery_payload", "job_status_version", "claim_subject"} {
+	for _, missing := range []string{"outbox_effects", "job_status_callbacks", "apply_recoveries", "apply_recovery_revision", "ordering_domains", "delivery_payload", "job_status_version", "claim_subject", "github_submissions"} {
 		t.Run(missing, func(t *testing.T) {
 			database := newPostgresOutboxTestDatabase(t)
-			require.NoError(t, database.GormDB.AutoMigrate(&JobStatusCallback{}, &ApplyRecovery{}, &DiggerJobParentLink{}, &ExecutionGrantKey{}))
+			require.NoError(t, database.GormDB.AutoMigrate(&JobStatusCallback{}, &ApplyRecovery{}, &DiggerJobParentLink{}, &ExecutionGrantKey{}, &GithubSubmission{}))
 			require.NoError(t, database.CheckDurableControlPlaneSchema(context.Background()))
 			switch missing {
 			case "outbox_effects":
@@ -30,6 +30,8 @@ func TestPostgresDurableControlPlaneSchemaRequiresTablesAndColumns(t *testing.T)
 				require.NoError(t, database.GormDB.Migrator().DropColumn(&DiggerJob{}, "StatusVersion"))
 			case "claim_subject":
 				require.NoError(t, database.GormDB.Migrator().DropColumn(&ExecutionClaimAttempt{}, "OIDCSubject"))
+			case "github_submissions":
+				require.NoError(t, database.GormDB.Migrator().DropTable(&GithubSubmission{}))
 			}
 			require.Error(t, database.CheckDurableControlPlaneSchema(context.Background()))
 		})

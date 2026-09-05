@@ -126,10 +126,11 @@ func configureDurableGraphTestDatabase(t *testing.T, gormDB *gorm.DB) (*models.D
 		OrganisationId:       organisation.ID,
 		Status:               models.GithubAppInstallationLinkActive,
 	}).Error)
+	deliveryPayload := []byte(`{"action":"opened"}`)
 	_, created, err := database.RecordGithubWebhookDelivery(context.Background(), &models.GithubWebhookDelivery{
 		DeliveryID:         "durable-graph-delivery",
-		PayloadSHA256:      "durable-graph-payload-sha256",
-		Payload:            []byte(`{"action":"opened"}`),
+		PayloadSHA256:      fmt.Sprintf("%x", sha256.Sum256(deliveryPayload)),
+		Payload:            deliveryPayload,
 		EventType:          "pull_request",
 		GithubAppID:        456,
 		InstallationID:     &installationID,
