@@ -60,7 +60,7 @@ func newGithubSubmissionFixture(t *testing.T) (*models.Database, DurableJobGraph
 	require.NoError(t, err)
 	graph, err := PrepareDurableGraphIntent(request)
 	require.NoError(t, err)
-	return database, request, models.GithubSubmissionIntent{Graph: *graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-two", "root-one"}}}}
+	return database, request, models.GithubSubmissionIntent{Graph: graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-two", "root-one"}}}}
 }
 
 func TestPostgresGithubSubmissionReloadsFrozenIntentAndBuildsSameGraph(t *testing.T) {
@@ -81,7 +81,7 @@ func TestPostgresGithubSubmissionReloadsFrozenIntentAndBuildsSameGraph(t *testin
 	decoded, err := models.DecodeGithubSubmissionIntent(loaded.Intent)
 	require.NoError(t, err)
 	require.Equal(t, request.CommitSHA, decoded.Graph.CommitSHA)
-	batchID, _, err := CreateDurableGraphFromIntent(context.Background(), request.Identity, decoded.Graph)
+	batchID, _, err := CreateDurableGraphFromIntent(context.Background(), request.Identity, *decoded.Graph)
 	require.NoError(t, err)
 	replayBatchID, _, err := ConvertJobsToDiggerJobsDurable(context.Background(), request)
 	require.NoError(t, err)
@@ -138,7 +138,7 @@ func TestPostgresGithubSubmissionRejectsDifferentSelectedTarget(t *testing.T) {
 			graph, err := PrepareDurableGraphIntent(changed)
 			require.NoError(t, err)
 			invalid := intent
-			invalid.Graph = *graph
+			invalid.Graph = graph
 			_, _, err = database.RecordGithubSubmission(context.Background(), request.Identity, invalid)
 			require.ErrorIs(t, err, models.ErrGithubDeliveryTargetConflict)
 			var count int64
@@ -230,7 +230,7 @@ func TestGithubSubmissionDecoderRejectsUnknownFieldsAndSourceAmbiguity(t *testin
 	_, organisation, delivery := newDurableGraphTestDatabase(t)
 	graph, err := PrepareDurableGraphIntent(durableGraphTestRequest(t, organisation, delivery))
 	require.NoError(t, err)
-	intent := models.GithubSubmissionIntent{Graph: *graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-one"}}}}
+	intent := models.GithubSubmissionIntent{Graph: graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-one"}}}}
 	encoded, err := json.Marshal(intent)
 	require.NoError(t, err)
 	_, err = models.DecodeGithubSubmissionIntent(append(encoded, []byte(` {}`)...))

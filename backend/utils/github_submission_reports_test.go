@@ -16,7 +16,7 @@ func TestGithubSubmissionReportsUseFrozenOrderAndTime(t *testing.T) {
 	_, org, delivery := newDurableGraphTestDatabase(t)
 	graph, err := PrepareDurableGraphIntent(durableGraphTestRequest(t, org, delivery))
 	require.NoError(t, err)
-	intent := models.GithubSubmissionIntent{Graph: *graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-two", "root-one"}}}}
+	intent := models.GithubSubmissionIntent{Graph: graph, Sources: []models.GithubSubmissionSource{{Location: "modules/network", Projects: []string{"root-two", "root-one"}}}}
 	selectedAt := time.Date(2026, 9, 5, 1, 2, 3, 0, time.UTC)
 	prepared, err := PrepareGithubSubmissionWithReports(intent, 456, selectedAt)
 	require.NoError(t, err)
@@ -46,7 +46,7 @@ func TestGithubSubmissionReportsUseFrozenOrderAndTime(t *testing.T) {
 	require.Equal(t, "| Project | Status |\n|---------|--------|\n|:clock11: **child**|pending...|\n|:clock11: **root-one**|pending...|\n|:clock11: **root-two**|pending...|\n", byKey["initial:summary"].Body)
 	require.Equal(t, "<details ><summary>Report for location: modules/network 2026-09-05 01:02:03 (UTC)</summary>\n  \n</details>", byKey["initial:source:0"].Body)
 	graph.Jobs[0], graph.Jobs[2] = graph.Jobs[2], graph.Jobs[0]
-	intent.Graph = *graph
+	intent.Graph = graph
 	again, err := PrepareGithubSubmissionWithReports(intent, 456, selectedAt.In(time.FixedZone("other", 3600)))
 	require.NoError(t, err)
 	firstRaw, err := json.Marshal(prepared)
@@ -62,7 +62,7 @@ func TestGithubSubmissionReportsRejectInvalidBindings(t *testing.T) {
 	_, org, delivery := newDurableGraphTestDatabase(t)
 	graph, err := PrepareDurableGraphIntent(durableGraphTestRequest(t, org, delivery))
 	require.NoError(t, err)
-	prepared, err := PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: *graph}, 456, time.Now().UTC())
+	prepared, err := PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: graph}, 456, time.Now().UTC())
 	require.NoError(t, err)
 	raw, err := json.Marshal(prepared)
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestGithubSubmissionReportsRejectForeignTargetsAndDuplicateKeys(t *testing.
 	request.JobReporterType = "noop"
 	graph, err := PrepareDurableGraphIntent(request)
 	require.NoError(t, err)
-	prepared, err := PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: *graph}, 456, time.Now().UTC())
+	prepared, err := PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: graph}, 456, time.Now().UTC())
 	require.NoError(t, err)
 	require.Len(t, prepared.Reports, 5, "noop reporter still creates checks, but no summary comment")
 	valid, err := json.Marshal(prepared)

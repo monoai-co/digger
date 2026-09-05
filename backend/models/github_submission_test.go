@@ -12,7 +12,7 @@ import (
 func submissionIntentFixture(t *testing.T) GithubSubmissionIntent {
 	t.Helper()
 	pr := 42
-	intent := GithubSubmissionIntent{Graph: DurableGraphIntent{ProtocolVersion: operation.ProtocolVersion,
+	intent := GithubSubmissionIntent{Graph: &DurableGraphIntent{ProtocolVersion: operation.ProtocolVersion,
 		JobType: scheduler.DiggerCommandPlan, JobReporterType: "lazy", RepoOwner: "owner", RepoName: "repo", RepoFullName: "owner/repo",
 		OrganisationID: 1, GithubInstallationID: 2, CommitSHA: "commit", Branch: "branch", PullRequestNumber: pr}}
 	for _, project := range []string{"two", "one"} {
@@ -92,12 +92,12 @@ func TestGithubSubmissionGraphIdentityUsesDelivery(t *testing.T) {
 		require.NoError(t, err)
 		job.OperationID = jobID.String()
 	}
-	normalized, order, err := NormalizeDurableGraphIntent(deliveryID.String(), intent.Graph)
+	normalized, order, err := NormalizeDurableGraphIntent(deliveryID.String(), *intent.Graph)
 	require.NoError(t, err)
 	require.Equal(t, []string{"one", "two"}, order)
 	require.Equal(t, "one", normalized.Jobs[0].ProjectName)
 	intent.Graph.Jobs[0].OperationID, intent.Graph.Jobs[1].OperationID = intent.Graph.Jobs[1].OperationID, intent.Graph.Jobs[0].OperationID
-	_, _, err = NormalizeDurableGraphIntent(deliveryID.String(), intent.Graph)
+	_, _, err = NormalizeDurableGraphIntent(deliveryID.String(), *intent.Graph)
 	require.ErrorIs(t, err, ErrFrozenGraphIntent)
 }
 

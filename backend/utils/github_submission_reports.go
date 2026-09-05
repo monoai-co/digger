@@ -14,7 +14,7 @@ import (
 // Call only for a new submission, using its persisted target selection time.
 // Replays load the saved submission instead of rendering newer configuration.
 func PrepareGithubSubmissionWithReports(intent models.GithubSubmissionIntent, appID int64, preparedAt time.Time) (models.GithubSubmissionIntent, error) {
-	if len(intent.Reports) != 0 || preparedAt.IsZero() || appID <= 0 {
+	if intent.Graph == nil || intent.ReportOnly != nil || len(intent.Reports) != 0 || preparedAt.IsZero() || appID <= 0 {
 		return models.GithubSubmissionIntent{}, models.ErrGithubSubmissionIntent
 	}
 	raw, err := json.Marshal(intent)

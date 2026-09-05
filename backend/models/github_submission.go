@@ -29,9 +29,10 @@ type GithubSubmissionSource struct {
 }
 
 type GithubSubmissionIntent struct {
-	Graph   DurableGraphIntent       `json:"graph"`
-	Sources []GithubSubmissionSource `json:"sources"`
-	Reports []GithubSubmissionReport `json:"reports"`
+	Graph      *DurableGraphIntent      `json:"graph"`
+	Sources    []GithubSubmissionSource `json:"sources"`
+	Reports    []GithubSubmissionReport `json:"reports"`
+	ReportOnly *GithubReportOnlyOutcome `json:"report_only,omitempty"`
 }
 
 type GithubSubmissionReport struct {
@@ -52,6 +53,7 @@ const (
 	GithubSubmissionReportBatch     GithubSubmissionReportRole = "batch"
 	GithubSubmissionReportCompanion GithubSubmissionReportRole = "companion"
 	GithubSubmissionReportSource    GithubSubmissionReportRole = "source"
+	GithubSubmissionReportOutcome   GithubSubmissionReportRole = "outcome"
 )
 
 // GithubSubmission preserves the first selected execution and reporting inputs.
@@ -77,11 +79,17 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 	if err := decodeGithubSubmissionJSON(raw, &intent); err != nil {
 		return intent, err
 	}
-	normalized, _, err := normalizeFrozenGraphShape(intent.Graph)
+	if intent.ReportOnly != nil {
+		return normalizeGithubReportOnlySubmission(intent)
+	}
+	if intent.Graph == nil {
+		return intent, ErrGithubSubmissionIntent
+	}
+	normalized, _, err := normalizeFrozenGraphShape(*intent.Graph)
 	if err != nil {
 		return intent, ErrGithubSubmissionIntent
 	}
-	intent.Graph = *normalized
+	intent.Graph = normalized
 	projects := make(map[string]bool, len(intent.Graph.Jobs))
 	for _, job := range intent.Graph.Jobs {
 		projects[job.ProjectName] = true
@@ -385,7 +393,13 @@ func lockGithubPreparationDelivery(tx *gorm.DB, identity JobCreationIdentity) (*
 }
 
 func validateGithubSubmissionEnvelope(tx *gorm.DB, identity JobCreationIdentity, intent GithubSubmissionIntent, delivery *GithubWebhookDelivery, orgID uint) error {
-	graph := intent.Graph
+	if intent.ReportOnly != nil {
+		return validateGithubReportOnlySubmissionEnvelope(tx, identity, intent, delivery, orgID)
+	}
+	if intent.Graph == nil {
+		return ErrGithubSubmissionIntent
+	}
+	graph := *intent.Graph
 	if graph.ProtocolVersion != identity.ProtocolVersion {
 		return ErrControlPlaneProtocol
 	}

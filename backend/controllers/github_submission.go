@@ -43,7 +43,7 @@ func (d DiggerController) processGithubCheckSubmission(ctx context.Context, deli
 			if err != nil {
 				return err
 			}
-			submission, err := utils.PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: *graph}, delivery.GithubAppID, time.Now().UTC())
+			submission, err := utils.PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: graph}, delivery.GithubAppID, time.Now().UTC())
 			if err != nil {
 				return err
 			}
@@ -74,9 +74,12 @@ func (d DiggerController) resumeGithubSubmission(ctx context.Context, identity m
 	if !ready {
 		return errGithubSubmissionReportsPending
 	}
+	if intent.ReportOnly != nil {
+		return nil
+	}
 	// Report IDs stay in their receipts, outside the frozen execution graph.
 	// Graph creation atomically publishes the initial workflow dispatches.
-	if _, _, err := utils.CreateDurableGraphFromIntent(ctx, identity, intent.Graph); err != nil {
+	if _, _, err := utils.CreateDurableGraphFromIntent(ctx, identity, *intent.Graph); err != nil {
 		return err
 	}
 	if d.OutboxDispatcher != nil {

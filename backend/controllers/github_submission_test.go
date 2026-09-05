@@ -38,6 +38,65 @@ func TestGithubWebhookProcessorKeepsPendingReportsBeyondRetryHorizon(t *testing.
 	require.Nil(t, stored.DeadLetteredAt)
 }
 
+func TestPostgresGithubReportOnlySubmissionResumeNeverCreatesExecution(t *testing.T) {
+	database, organisation, delivery := newDurableExecutionIntegrationDatabase(t)
+	require.NoError(t, database.GormDB.AutoMigrate(&models.GithubSubmission{}, &models.GithubReportReceipt{}))
+	identity := models.JobCreationIdentity{DatabaseIdentity: durableExecutionIntegrationDatabaseIdentity,
+		WriterEpoch: durableExecutionIntegrationWriterEpoch, ProtocolVersion: operation.ProtocolVersion,
+		DeliveryOperationID: delivery.OperationID, DeliveryLeaseID: delivery.LeaseID}
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(delivery)
+	require.NoError(t, err)
+	target, err := preparation.Resolve(nil)
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), identity, target)
+	require.NoError(t, err)
+	payload := models.GithubReportCreatePayload{OrganisationID: organisation.ID, GithubAppID: delivery.GithubAppID,
+		GithubInstallationID: delivery.InstallationIDValue(), RepoOwner: target.RepoOwner, RepoName: target.RepoName,
+		PullRequestNumber: target.PullRequestNumber + 1, ResourceKind: models.GithubReportResourceComment, Body: "No impacted projects"}
+	wrong, err := models.PrepareGithubReportOnlySubmission("no_impacted_projects", []models.GithubReportCreatePayload{payload})
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubSubmission(context.Background(), identity, wrong)
+	require.ErrorIs(t, err, models.ErrGithubSubmissionConflict)
+	payload.PullRequestNumber = target.PullRequestNumber
+	intent, err := models.PrepareGithubReportOnlySubmission("no_impacted_projects", []models.GithubReportCreatePayload{payload})
+	require.NoError(t, err)
+	stored, _, err := database.RecordGithubSubmission(context.Background(), identity, intent)
+	require.NoError(t, err)
+	controller := DiggerController{}
+	require.ErrorIs(t, controller.resumeGithubSubmission(context.Background(), identity, stored), errGithubSubmissionReportsPending)
+	var effect models.OutboxEffect
+	require.NoError(t, database.GormDB.First(&effect, "operation_id = ?", delivery.OperationID).Error)
+	lease := "report-only-create"
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("id = ?", effect.ID).Updates(map[string]any{
+		"status": models.OutboxEffectProcessing, "lease_id": lease, "lease_expires_at": time.Now().UTC().Add(time.Minute),
+	}).Error)
+	prepared, err := database.PrepareGithubReportCreate(context.Background(), effect.ID, lease, identity.DatabaseIdentity, identity.WriterEpoch)
+	require.NoError(t, err)
+	require.True(t, prepared.MayCreate)
+	providerURL, err := models.GithubReportProviderURL(payload, 123)
+	require.NoError(t, err)
+	raw, err := json.Marshal(models.GithubReportCreateReceipt{EffectID: effect.ID, PayloadSHA256: effect.PayloadSHA256,
+		ResourceKind: payload.ResourceKind, ProviderID: 123, ProviderURL: providerURL})
+	require.NoError(t, err)
+	require.NoError(t, database.CompleteOutboxEffect(context.Background(), effect.ID, lease, raw, time.Now().UTC(), identity.DatabaseIdentity, identity.WriterEpoch))
+	for attempt := 0; attempt < 2; attempt++ {
+		replayed, err := database.GetGithubSubmission(context.Background(), identity)
+		require.NoError(t, err)
+		require.NoError(t, controller.resumeGithubSubmission(context.Background(), identity, replayed))
+		require.Equal(t, stored.IntentSHA256, replayed.IntentSHA256)
+	}
+	intent.ReportOnly.Reason = "changed_outcome"
+	_, _, err = database.RecordGithubSubmission(context.Background(), identity, intent)
+	require.ErrorIs(t, err, models.ErrGithubSubmissionConflict)
+	var count int64
+	require.NoError(t, database.GormDB.Model(&models.DiggerBatch{}).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, database.GormDB.Model(&models.DiggerJob{}).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Where("effect_kind = ?", models.GithubWorkflowDispatchEffectKind).Count(&count).Error)
+	require.Zero(t, count)
+}
+
 func TestPostgresGithubSubmissionResumeCreatesOneGraphAfterReportReceipts(t *testing.T) {
 	database, organisation, delivery := newDurableExecutionIntegrationDatabase(t)
 	require.NoError(t, database.GormDB.AutoMigrate(&models.GithubSubmission{}, &models.GithubReportReceipt{}))
@@ -70,7 +129,7 @@ func TestPostgresGithubSubmissionResumeCreatesOneGraphAfterReportReceipts(t *tes
 		CommitSHA: target.HeadSHA, DiggerConfig: "projects: []",
 	})
 	require.NoError(t, err)
-	intent, err := utils.PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: *graph}, delivery.GithubAppID, time.Now().UTC())
+	intent, err := utils.PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: graph}, delivery.GithubAppID, time.Now().UTC())
 	require.NoError(t, err)
 	stored, _, err := database.RecordGithubSubmission(context.Background(), identity, intent)
 	require.NoError(t, err)
