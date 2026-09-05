@@ -36,25 +36,37 @@ func PrepareGithubSubmissionWithReports(intent models.GithubSubmissionIntent, ap
 	base := models.GithubReportCreatePayload{OrganisationID: prepared.Graph.OrganisationID, GithubAppID: appID,
 		GithubInstallationID: prepared.Graph.GithubInstallationID, RepoOwner: prepared.Graph.RepoOwner, RepoName: prepared.Graph.RepoName,
 		PullRequestNumber: prepared.Graph.PullRequestNumber}
-	appendReport := func(key string, payload models.GithubReportCreatePayload, optional bool) error {
+	appendReport := func(report models.GithubSubmissionReport, payload models.GithubReportCreatePayload) error {
 		raw, err := models.PrepareGithubReportCreatePayload(payload)
 		if err != nil {
 			return err
 		}
-		prepared.Reports = append(prepared.Reports, models.GithubSubmissionReport{Key: key, Payload: raw, Optional: optional})
+		report.Payload, report.Order = raw, len(prepared.Reports)
+		prepared.Reports = append(prepared.Reports, report)
 		return nil
 	}
 	if prepared.Graph.JobReporterType != "noop" {
 		comment := base
 		comment.ResourceKind, comment.Body = models.GithubReportResourceComment, GetInitialJobSummaryFromJobSpecs(jobs)
-		if err := appendReport("initial:summary", comment, false); err != nil {
+		if err := appendReport(models.GithubSubmissionReport{Key: "initial:summary", Role: models.GithubSubmissionReportSummary}, comment); err != nil {
 			return models.GithubSubmissionIntent{}, err
 		}
 	}
 	for index, initial := range RenderGithubInitialChecks(jobs) {
 		check := base
 		check.ResourceKind, check.HeadSHA, check.Check = models.GithubReportResourceCheckRun, prepared.Graph.CommitSHA, &initial.Check
-		if err := appendReport(fmt.Sprintf("initial:check:%d", index), check, initial.Optional); err != nil {
+		var role models.GithubSubmissionReportRole
+		switch initial.Role {
+		case GithubInitialCheckProject:
+			role = models.GithubSubmissionReportProject
+		case GithubInitialCheckBatch:
+			role = models.GithubSubmissionReportBatch
+		case GithubInitialCheckCompanion:
+			role = models.GithubSubmissionReportCompanion
+		default:
+			return models.GithubSubmissionIntent{}, models.ErrGithubSubmissionIntent
+		}
+		if err := appendReport(models.GithubSubmissionReport{Key: fmt.Sprintf("initial:check:%d", index), Role: role, ProjectName: initial.ProjectName, Optional: initial.Optional}, check); err != nil {
 			return models.GithubSubmissionIntent{}, err
 		}
 	}
@@ -62,7 +74,7 @@ func PrepareGithubSubmissionWithReports(intent models.GithubSubmissionIntent, ap
 		comment := base
 		title := fmt.Sprintf("Report for location: %s %s", source.Location, preparedAt.UTC().Format("2006-01-02 15:04:05 (MST)"))
 		comment.ResourceKind, comment.Body = models.GithubReportResourceComment, reporting.AsCollapsibleComment(title, false)("")
-		if err := appendReport(fmt.Sprintf("initial:source:%d", index), comment, false); err != nil {
+		if err := appendReport(models.GithubSubmissionReport{Key: fmt.Sprintf("initial:source:%d", index), Role: models.GithubSubmissionReportSource, SourceLocation: source.Location}, comment); err != nil {
 			return models.GithubSubmissionIntent{}, err
 		}
 	}

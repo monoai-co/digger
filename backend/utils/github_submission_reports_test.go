@@ -28,6 +28,15 @@ func TestGithubSubmissionReportsUseFrozenOrderAndTime(t *testing.T) {
 		require.NoError(t, err)
 		byKey[report.Key] = payload
 		require.Equal(t, report.Key == "initial:check:4", report.Optional)
+		if report.Key == "initial:check:1" {
+			require.Equal(t, models.GithubSubmissionReportProject, report.Role)
+			require.Equal(t, "root-one", report.ProjectName)
+			require.Equal(t, 2, report.Order)
+		}
+		if report.Key == "initial:source:0" {
+			require.Equal(t, models.GithubSubmissionReportSource, report.Role)
+			require.Equal(t, "modules/network", report.SourceLocation)
+		}
 	}
 	require.Equal(t, "child/plan", byKey["initial:check:0"].Check.Name)
 	require.Equal(t, "root-one/plan", byKey["initial:check:1"].Check.Name)
@@ -47,6 +56,32 @@ func TestGithubSubmissionReportsUseFrozenOrderAndTime(t *testing.T) {
 	require.Equal(t, firstRaw, secondRaw)
 	_, err = PrepareGithubSubmissionWithReports(prepared, 456, selectedAt)
 	require.ErrorIs(t, err, models.ErrGithubSubmissionIntent)
+}
+
+func TestGithubSubmissionReportsRejectInvalidBindings(t *testing.T) {
+	_, org, delivery := newDurableGraphTestDatabase(t)
+	graph, err := PrepareDurableGraphIntent(durableGraphTestRequest(t, org, delivery))
+	require.NoError(t, err)
+	prepared, err := PrepareGithubSubmissionWithReports(models.GithubSubmissionIntent{Graph: *graph}, 456, time.Now().UTC())
+	require.NoError(t, err)
+	raw, err := json.Marshal(prepared)
+	require.NoError(t, err)
+	for name, mutate := range map[string]func(*models.GithubSubmissionIntent){
+		"role":             func(i *models.GithubSubmissionIntent) { i.Reports[0].Role = "unsupported" },
+		"project":          func(i *models.GithubSubmissionIntent) { i.Reports[0].ProjectName = "missing-project" },
+		"source":           func(i *models.GithubSubmissionIntent) { i.Reports[0].SourceLocation = "unbound-source" },
+		"optional project": func(i *models.GithubSubmissionIntent) { i.Reports[0].Optional = true },
+		"negative order":   func(i *models.GithubSubmissionIntent) { i.Reports[0].Order = -1 },
+		"duplicate order":  func(i *models.GithubSubmissionIntent) { i.Reports[1].Order = i.Reports[0].Order },
+	} {
+		var invalid models.GithubSubmissionIntent
+		require.NoError(t, json.Unmarshal(raw, &invalid))
+		mutate(&invalid)
+		encoded, err := json.Marshal(invalid)
+		require.NoError(t, err)
+		_, err = models.DecodeGithubSubmissionIntent(encoded)
+		require.ErrorIs(t, err, models.ErrGithubSubmissionIntent, name)
+	}
 }
 
 func TestPostgresGithubSubmissionFreezesReportsAcrossReplay(t *testing.T) {

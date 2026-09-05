@@ -34,10 +34,24 @@ type GithubSubmissionIntent struct {
 }
 
 type GithubSubmissionReport struct {
-	Key      string          `json:"key"`
-	Payload  json.RawMessage `json:"payload"`
-	Optional bool            `json:"optional"`
+	Key            string                     `json:"key"`
+	Payload        json.RawMessage            `json:"payload"`
+	Optional       bool                       `json:"optional"`
+	Role           GithubSubmissionReportRole `json:"role"`
+	ProjectName    string                     `json:"project_name"`
+	SourceLocation string                     `json:"source_location"`
+	Order          int                        `json:"order"`
 }
+
+type GithubSubmissionReportRole string
+
+const (
+	GithubSubmissionReportSummary   GithubSubmissionReportRole = "summary"
+	GithubSubmissionReportProject   GithubSubmissionReportRole = "project"
+	GithubSubmissionReportBatch     GithubSubmissionReportRole = "batch"
+	GithubSubmissionReportCompanion GithubSubmissionReportRole = "companion"
+	GithubSubmissionReportSource    GithubSubmissionReportRole = "source"
+)
 
 // GithubSubmission preserves the first selected execution and reporting inputs.
 // Report receipts and current delivery leases are not part of this immutable row.
@@ -95,18 +109,51 @@ func DecodeGithubSubmissionIntent(raw []byte) (GithubSubmissionIntent, error) {
 		intent.Reports = []GithubSubmissionReport{}
 	}
 	keys := make(map[string]bool, len(intent.Reports))
+	orders := make(map[int]bool, len(intent.Reports))
+	bindings := make(map[string]bool, len(intent.Reports))
 	for index := range intent.Reports {
 		report := &intent.Reports[index]
 		if report.Key == "" || report.Key != strings.TrimSpace(report.Key) || !utf8.ValidString(report.Key) || keys[report.Key] {
 			return intent, ErrGithubSubmissionIntent
 		}
 		keys[report.Key] = true
+		if report.Order < 0 || orders[report.Order] || (report.Optional && report.Role != GithubSubmissionReportCompanion) {
+			return intent, ErrGithubSubmissionIntent
+		}
+		orders[report.Order] = true
 		payload, err := DecodeGithubReportCreatePayload(report.Payload)
 		if err != nil || payload.OrganisationID != intent.Graph.OrganisationID || payload.GithubInstallationID != intent.Graph.GithubInstallationID ||
 			payload.RepoOwner != intent.Graph.RepoOwner || payload.RepoName != intent.Graph.RepoName || payload.PullRequestNumber != intent.Graph.PullRequestNumber ||
 			(payload.ResourceKind == GithubReportResourceCheckRun && payload.HeadSHA != intent.Graph.CommitSHA) {
 			return intent, ErrGithubSubmissionIntent
 		}
+		binding := string(report.Role)
+		switch report.Role {
+		case GithubSubmissionReportProject:
+			if !projects[report.ProjectName] || report.SourceLocation != "" || payload.ResourceKind != GithubReportResourceCheckRun {
+				return intent, ErrGithubSubmissionIntent
+			}
+			binding = fmt.Sprintf("project:%s:%d", report.ProjectName, report.Order)
+		case GithubSubmissionReportSource:
+			if !locations[report.SourceLocation] || report.ProjectName != "" || payload.ResourceKind != GithubReportResourceComment {
+				return intent, ErrGithubSubmissionIntent
+			}
+			binding += ":" + report.SourceLocation
+		case GithubSubmissionReportBatch, GithubSubmissionReportCompanion:
+			if report.ProjectName != "" || report.SourceLocation != "" || payload.ResourceKind != GithubReportResourceCheckRun {
+				return intent, ErrGithubSubmissionIntent
+			}
+		case GithubSubmissionReportSummary:
+			if report.ProjectName != "" || report.SourceLocation != "" || payload.ResourceKind != GithubReportResourceComment {
+				return intent, ErrGithubSubmissionIntent
+			}
+		default:
+			return intent, ErrGithubSubmissionIntent
+		}
+		if bindings[binding] {
+			return intent, ErrGithubSubmissionIntent
+		}
+		bindings[binding] = true
 		report.Payload, err = CanonicalGithubReportCreatePayload(payload)
 		if err != nil {
 			return intent, ErrGithubSubmissionIntent
