@@ -1,5 +1,6 @@
 # Repository tooling
 
+- `scheduler.CountUniqueLayers` returns a count and the layer list, not an error.
 - Cancelling a Git parent alone can leave `git-remote-http` holding its pipes
   open. Unix Git commands use a separate process group and cancel that group;
   keep the HTTP-fetch cancellation regression enabled when changing Git helpers.
