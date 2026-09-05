@@ -13,6 +13,11 @@ import (
 // Its payloads retain the complete first-selected response to a delivery.
 type GithubReportOnlyOutcome struct {
 	Reason string `json:"reason"`
+	Silent bool   `json:"silent,omitempty"`
+}
+
+func PrepareGithubSilentSubmission(reason string) (GithubSubmissionIntent, error) {
+	return normalizeGithubReportOnlySubmission(GithubSubmissionIntent{ReportOnly: &GithubReportOnlyOutcome{Reason: reason, Silent: true}})
 }
 
 func PrepareGithubReportOnlySubmission(reason string, payloads []GithubReportCreatePayload) (GithubSubmissionIntent, error) {
@@ -29,12 +34,18 @@ func PrepareGithubReportOnlySubmission(reason string, payloads []GithubReportCre
 }
 
 func normalizeGithubReportOnlySubmission(intent GithubSubmissionIntent) (GithubSubmissionIntent, error) {
-	if intent.Graph != nil || intent.ReportOnly == nil || len(intent.Sources) != 0 || len(intent.Reports) == 0 ||
+	if intent.Graph != nil || intent.ReportOnly == nil || len(intent.Sources) != 0 ||
 		intent.ReportOnly.Reason == "" || len(intent.ReportOnly.Reason) > 128 ||
 		intent.ReportOnly.Reason != strings.TrimSpace(intent.ReportOnly.Reason) || !utf8.ValidString(intent.ReportOnly.Reason) {
 		return intent, ErrGithubSubmissionIntent
 	}
+	if intent.ReportOnly.Silent != (len(intent.Reports) == 0) {
+		return intent, ErrGithubSubmissionIntent
+	}
 	intent.Sources = []GithubSubmissionSource{}
+	if intent.Reports == nil {
+		intent.Reports = []GithubSubmissionReport{}
+	}
 	keys, orders := make(map[string]bool), make(map[int]bool)
 	var first GithubReportCreatePayload
 	var head string

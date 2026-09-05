@@ -15,6 +15,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPostgresGithubSilentSubmissionResumesWithoutReportsOrExecution(t *testing.T) {
+	database, _, delivery := newDurableExecutionIntegrationDatabase(t)
+	require.NoError(t, database.GormDB.AutoMigrate(&models.GithubSubmission{}))
+	identity := models.JobCreationIdentity{DatabaseIdentity: durableExecutionIntegrationDatabaseIdentity, WriterEpoch: durableExecutionIntegrationWriterEpoch,
+		ProtocolVersion: operation.ProtocolVersion, DeliveryOperationID: delivery.OperationID, DeliveryLeaseID: delivery.LeaseID}
+	preparation, err := models.PrepareGithubDeliveryTargetIntent(delivery)
+	require.NoError(t, err)
+	target, err := preparation.Resolve(nil)
+	require.NoError(t, err)
+	_, _, err = database.RecordGithubDeliveryTarget(context.Background(), identity, target)
+	require.NoError(t, err)
+	intent, err := models.PrepareGithubSilentSubmission("draft_ignored")
+	require.NoError(t, err)
+	stored, _, err := database.RecordGithubSubmission(context.Background(), identity, intent)
+	require.NoError(t, err)
+	controller := DiggerController{}
+	for i := 0; i < 2; i++ {
+		require.NoError(t, controller.resumeGithubSubmission(context.Background(), identity, stored))
+	}
+	var count int64
+	require.NoError(t, database.GormDB.Model(&models.OutboxEffect{}).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, database.GormDB.Model(&models.DiggerJob{}).Count(&count).Error)
+	require.Zero(t, count)
+}
+
 func TestGithubWebhookProcessorKeepsPendingReportsBeyondRetryHorizon(t *testing.T) {
 	database := newGithubWebhookProcessorTestDatabase(t)
 	var calls atomic.Int32

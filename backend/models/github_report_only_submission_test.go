@@ -7,6 +7,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGithubSilentSubmissionRequiresExplicitNoEffectOutcome(t *testing.T) {
+	intent, err := PrepareGithubSilentSubmission("draft_ignored")
+	require.NoError(t, err)
+	raw, _, err := canonicalGithubSubmissionIntent(intent)
+	require.NoError(t, err)
+	decoded, err := DecodeGithubSubmissionIntent(raw)
+	require.NoError(t, err)
+	require.True(t, decoded.ReportOnly.Silent)
+	require.Empty(t, decoded.Reports)
+	require.Nil(t, decoded.Graph)
+	decoded.ReportOnly.Silent = false
+	_, _, err = canonicalGithubSubmissionIntent(decoded)
+	require.ErrorIs(t, err, ErrGithubSubmissionIntent)
+	withReport, err := PrepareGithubReportOnlySubmission("has_report", []GithubReportCreatePayload{githubReportCheckFixture()})
+	require.NoError(t, err)
+	withReport.ReportOnly.Silent = true
+	_, _, err = canonicalGithubSubmissionIntent(withReport)
+	require.ErrorIs(t, err, ErrGithubSubmissionIntent)
+}
+
 func TestGithubReportOnlySubmissionRejectsMixedOrMissingOutcomes(t *testing.T) {
 	check := githubReportCheckFixture()
 	comment := check
