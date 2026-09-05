@@ -8,9 +8,28 @@ import (
 
 	"github.com/google/go-github/v61/github"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var ErrGithubCheckActionBinding = errors.New("github check action does not match its persisted batch")
+
+func (db *Database) ResolveGithubCheckDeliveryTarget(ctx context.Context, delivery *GithubWebhookDelivery) (GithubDeliveryTargetIntent, error) {
+	preparation, err := PrepareGithubDeliveryTargetIntent(delivery)
+	if err != nil {
+		return GithubDeliveryTargetIntent{}, err
+	}
+	if preparation.checkAction == nil {
+		return GithubDeliveryTargetIntent{}, ErrGithubDeliveryTargetUnsupported
+	}
+	batch, _, err := db.ResolveLegacyGithubCheckAction(ctx, preparation.checkAction, delivery.GithubAppID)
+	if err != nil {
+		return GithubDeliveryTargetIntent{}, err
+	}
+	target := preparation.target
+	target.PullRequestNumber, target.HeadRef = batch.PrNumber, batch.BranchName
+	return target, nil
+}
 
 // ResolveLegacyGithubCheckAction preserves existing apply buttons without
 // trusting their short batch identifier as authority to select a repository.
@@ -25,7 +44,11 @@ func (db *Database) ResolveLegacyGithubCheckAction(ctx context.Context, event *g
 		return nil, nil, ErrGithubCheckActionBinding
 	}
 	var batches []DiggerBatch
-	if err := db.GormDB.WithContext(ctx).Where("digger_batch_id = ? AND vcs = ? AND repo_full_name = ? AND github_installation_id = ?",
+	query := db.GormDB.WithContext(ctx)
+	if query.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "SHARE"})
+	}
+	if err := query.Session(&gorm.Session{}).Where("digger_batch_id = ? AND vcs = ? AND repo_full_name = ? AND github_installation_id = ?",
 		batchID, DiggerVCSGithub, event.GetRepo().GetFullName(), event.GetInstallation().GetID()).Limit(2).Find(&batches).Error; err != nil {
 		return nil, nil, err
 	}
@@ -34,7 +57,7 @@ func (db *Database) ResolveLegacyGithubCheckAction(ctx context.Context, event *g
 	}
 	batch := &batches[0]
 	var jobs []DiggerJob
-	if err := db.GormDB.WithContext(ctx).Where("batch_id = ?", batch.ID.String()).Find(&jobs).Error; err != nil {
+	if err := query.Session(&gorm.Session{}).Where("batch_id = ?", batch.ID.String()).Find(&jobs).Error; err != nil {
 		return nil, nil, err
 	}
 	if err := validateLegacyGithubCheckAction(event, appID, batch, jobs); err != nil {

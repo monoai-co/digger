@@ -46,7 +46,7 @@ func DecodeGithubDeliveryTarget(raw []byte) (GithubDeliveryTargetIntent, error) 
 		target.PullRequestNumber <= 0 || !validGithubReportPathSegment(target.HeadSHA) || !validGithubDeliveryHeadRef(target.HeadRef) {
 		return target, ErrGithubDeliveryTargetIntent
 	}
-	if target.Source != GithubDeliveryTargetSignedPullRequest && target.Source != GithubDeliveryTargetIssueCommentLookup {
+	if target.Source != GithubDeliveryTargetSignedPullRequest && target.Source != GithubDeliveryTargetIssueCommentLookup && target.Source != GithubDeliveryTargetLegacyCheckAction {
 		return target, ErrGithubDeliveryTargetUnsupported
 	}
 	return target, nil
@@ -88,6 +88,15 @@ func (db *Database) RecordGithubDeliveryTarget(ctx context.Context, identity Job
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		}
+		if intent.Source == GithubDeliveryTargetLegacyCheckAction {
+			resolved, err := (&Database{GormDB: tx}).ResolveGithubCheckDeliveryTarget(ctx, delivery)
+			if err != nil {
+				return err
+			}
+			if resolved != intent {
+				return ErrGithubDeliveryTargetConflict
+			}
 		}
 		now, err := databaseTransactionNow(tx, time.Now().UTC())
 		if err != nil {

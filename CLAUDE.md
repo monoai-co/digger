@@ -29,6 +29,9 @@
   not update an existing receipt: the control operation also binds its digest.
 - Manually seeded `DiggerJob` fixtures need a persisted `DiggerJobSummary` and
   its ID; PostgreSQL enforces that relation even for legacy jobs.
+- When sharing a GORM query with locking clauses, start each query from
+  `Session(&gorm.Session{})`; otherwise table and predicates can leak into the
+  next lookup. Keep the PostgreSQL resolver tests enabled to catch this.
 - For GORM relations whose foreign and referenced field names coincide, declare
   `belongsTo` explicitly. Otherwise AutoMigrate can infer the reverse foreign key;
   verify both PostgreSQL migration output and the SQLite test schema.

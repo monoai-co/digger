@@ -11,6 +11,7 @@ import (
 type githubDeliveryTargetStore interface {
 	GetGithubDeliveryTarget(context.Context, models.JobCreationIdentity) (*models.GithubDeliveryTarget, error)
 	RecordGithubDeliveryTarget(context.Context, models.JobCreationIdentity, models.GithubDeliveryTargetIntent) (*models.GithubDeliveryTarget, bool, error)
+	ResolveGithubCheckDeliveryTarget(context.Context, *models.GithubWebhookDelivery) (models.GithubDeliveryTargetIntent, error)
 }
 
 func prepareGithubDeliveryTarget(ctx context.Context, identity models.JobCreationIdentity, delivery *models.GithubWebhookDelivery, store githubDeliveryTargetStore, provider utils.ContextGithubClientProvider) (*models.GithubDeliveryTarget, error) {
@@ -21,7 +22,12 @@ func prepareGithubDeliveryTarget(ctx context.Context, identity models.JobCreatio
 	if !errors.Is(err, models.ErrGithubDeliveryTargetNotFound) {
 		return nil, err
 	}
-	intent, err := resolveGithubDeliveryTarget(ctx, delivery, provider)
+	var intent models.GithubDeliveryTargetIntent
+	if delivery.EventType == "check_run" {
+		intent, err = store.ResolveGithubCheckDeliveryTarget(ctx, delivery)
+	} else {
+		intent, err = resolveGithubDeliveryTarget(ctx, delivery, provider)
+	}
 	if err != nil {
 		return nil, err
 	}

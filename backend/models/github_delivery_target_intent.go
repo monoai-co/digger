@@ -19,6 +19,7 @@ type GithubDeliveryTargetSource string
 const (
 	GithubDeliveryTargetSignedPullRequest  GithubDeliveryTargetSource = "pull_request"
 	GithubDeliveryTargetIssueCommentLookup GithubDeliveryTargetSource = "issue_comment_pr_lookup"
+	GithubDeliveryTargetLegacyCheckAction  GithubDeliveryTargetSource = "legacy_check_action"
 )
 
 type GithubDeliveryTargetIntent struct {
@@ -46,6 +47,7 @@ type GithubDeliveryTargetPreparation struct {
 	target         GithubDeliveryTargetIntent
 	appID          int64
 	installationID int64
+	checkAction    *github.CheckRunEvent
 }
 
 // PrepareGithubDeliveryTargetIntent consumes an already authenticated inbox
@@ -59,9 +61,8 @@ func PrepareGithubDeliveryTargetIntent(delivery *GithubWebhookDelivery) (*Github
 	if err != nil || delivery.OperationID != expected.String() {
 		return nil, ErrGithubDeliveryTargetIntent
 	}
-	if delivery.EventType != "pull_request" && delivery.EventType != "issue_comment" {
-		// Check-run requested actions need a persisted check receipt/batch binding.
-		// A caller-selected PR association is not an authenticated target.
+	if delivery.EventType != "pull_request" && delivery.EventType != "issue_comment" && delivery.EventType != "check_run" {
+		// Other event classes do not select a PR execution target.
 		return nil, ErrGithubDeliveryTargetUnsupported
 	}
 	event, err := github.ParseWebHook(delivery.EventType, delivery.Payload)
@@ -89,10 +90,23 @@ func PrepareGithubDeliveryTargetIntent(delivery *GithubWebhookDelivery) (*Github
 		preparation.target.Source = GithubDeliveryTargetIssueCommentLookup
 		preparation.target.PullRequestNumber = event.Issue.GetNumber()
 		signedPRLink = event.Issue.PullRequestLinks.GetURL()
+	case *github.CheckRunEvent:
+		if event.GetAction() != "requested_action" || event.GetRequestedAction() == nil ||
+			!strings.HasPrefix(event.GetRequestedAction().Identifier, "abatch:") {
+			return nil, ErrGithubDeliveryTargetUnsupported
+		}
+		if event.GetCheckRun().GetID() <= 0 || event.GetCheckRun().GetApp().GetID() != delivery.GithubAppID || !validGithubReportPathSegment(event.GetCheckRun().GetHeadSHA()) {
+			return nil, ErrGithubDeliveryTargetIntent
+		}
+		repository, installation = event.GetRepo(), event.GetInstallation()
+		preparation.target.Source = GithubDeliveryTargetLegacyCheckAction
+		preparation.target.HeadSHA = event.GetCheckRun().GetHeadSHA()
+		preparation.checkAction = event
 	default:
 		return nil, ErrGithubDeliveryTargetUnsupported
 	}
-	if repository == nil || repository.GetID() <= 0 || installation.GetID() != preparation.installationID || preparation.target.PullRequestNumber <= 0 ||
+	if repository == nil || repository.GetID() <= 0 || installation.GetID() != preparation.installationID ||
+		(preparation.target.Source != GithubDeliveryTargetLegacyCheckAction && preparation.target.PullRequestNumber <= 0) ||
 		!validGithubReportPathSegment(repository.GetOwner().GetLogin()) || !validGithubReportPathSegment(repository.GetName()) ||
 		repository.GetFullName() != repository.GetOwner().GetLogin()+"/"+repository.GetName() || repository.GetFullName() != delivery.RepositoryFullName {
 		return nil, ErrGithubDeliveryTargetIntent
@@ -153,6 +167,7 @@ func (preparation *GithubDeliveryTargetPreparation) Resolve(pullRequest *github.
 // ValidateIntent rechecks the selected value against the accepted delivery.
 // An issue comment has no signed head: its head/ref are a trusted controller
 // observation, validated by Resolve before the first immutable write.
+// A legacy check action binds its PR/ref through the saved batch on first write.
 func (preparation *GithubDeliveryTargetPreparation) ValidateIntent(intent GithubDeliveryTargetIntent) error {
 	if preparation == nil {
 		return ErrGithubDeliveryTargetIntent
@@ -165,6 +180,11 @@ func (preparation *GithubDeliveryTargetPreparation) ValidateIntent(intent Github
 			return ErrGithubDeliveryTargetIntent
 		}
 		expected.HeadSHA, expected.HeadRef = intent.HeadSHA, intent.HeadRef
+	case GithubDeliveryTargetLegacyCheckAction:
+		if intent.PullRequestNumber <= 0 || !validGithubDeliveryHeadRef(intent.HeadRef) {
+			return ErrGithubDeliveryTargetIntent
+		}
+		expected.PullRequestNumber, expected.HeadRef = intent.PullRequestNumber, intent.HeadRef
 	default:
 		return ErrGithubDeliveryTargetUnsupported
 	}
