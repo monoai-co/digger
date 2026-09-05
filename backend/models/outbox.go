@@ -60,6 +60,16 @@ func (effect *OutboxEffect) ValidPayloadDigest() bool {
 func normalizeOutboxEffectPayload(effectKind string, payload []byte) ([]byte, error) {
 	var typedPayload any
 	switch effectKind {
+	case GithubReportCreateEffectKind:
+		report, err := DecodeGithubReportCreatePayload(payload)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrOutboxEffectPayload, err)
+		}
+		canonical, err := CanonicalGithubReportCreatePayload(report)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrOutboxEffectPayload, err)
+		}
+		return canonical, nil
 	case GithubWorkflowDispatchEffectKind:
 		typedPayload = &GithubWorkflowDispatchPayload{}
 	case GithubWorkflowReconcileEffectKind:
